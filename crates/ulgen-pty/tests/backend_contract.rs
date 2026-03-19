@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use ulgen_pty::{
     create_backend, create_contract_backend, create_default_backend,
     preferred_platform_backend_kind, BackendKind, CommandSpec, TerminalBackend, TerminalError,
@@ -10,7 +8,7 @@ fn sample_spec() -> CommandSpec {
     CommandSpec {
         command: "echo".to_string(),
         args: vec!["hello".to_string()],
-        cwd: PathBuf::from("/tmp"),
+        cwd: std::env::temp_dir(),
         env: vec![("ULGEN_TEST".to_string(), "1".to_string())],
     }
 }
@@ -125,11 +123,16 @@ fn preferred_platform_backend_reports_unsupported_until_implemented() {
 }
 
 #[test]
-fn default_runtime_backend_reports_unsupported_until_implemented() {
-    let mut backend = create_default_backend();
+fn default_backend_matches_contract() {
+    assert_backend_contract(create_default_backend());
+}
+
+#[test]
+fn runtime_backend_reports_unsupported_until_implemented() {
+    let mut backend = ulgen_pty::create_runtime_backend();
     let error = backend
         .write(&TerminalId("missing".to_string()), "x")
-        .expect_err("default runtime backend is not implemented yet");
+        .expect_err("runtime backend is not implemented yet");
 
     match error {
         TerminalError::Unsupported { backend, operation } => {

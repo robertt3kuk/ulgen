@@ -38,7 +38,7 @@ impl CommandSpec {
         );
 
         #[cfg(not(windows))]
-        let (program, args) = ("sh".to_string(), vec!["-lc".to_string(), command.clone()]);
+        let (program, args) = ("sh".to_string(), vec!["-c".to_string(), command.clone()]);
 
         Self {
             command: program,
@@ -86,7 +86,7 @@ pub enum BackendKind {
 }
 
 pub fn default_backend_kind() -> BackendKind {
-    runtime_backend_kind()
+    contract_backend_kind()
 }
 
 pub fn contract_backend_kind() -> BackendKind {
@@ -110,7 +110,7 @@ pub fn preferred_platform_backend_kind() -> BackendKind {
 }
 
 pub fn create_default_backend() -> Box<dyn TerminalBackend> {
-    create_runtime_backend()
+    create_contract_backend()
 }
 
 pub fn create_contract_backend() -> Box<dyn TerminalBackend> {
@@ -356,11 +356,7 @@ mod tests {
 
     #[test]
     fn default_backend_kind_matches_target_platform() {
-        #[cfg(windows)]
-        assert_eq!(default_backend_kind(), BackendKind::WindowsConpty);
-
-        #[cfg(not(windows))]
-        assert_eq!(default_backend_kind(), BackendKind::UnixPty);
+        assert_eq!(default_backend_kind(), BackendKind::Memory);
     }
 
     #[test]
@@ -387,7 +383,7 @@ mod tests {
             .spawn(CommandSpec {
                 command: "echo".to_string(),
                 args: vec!["hello".to_string()],
-                cwd: PathBuf::from("/tmp"),
+                cwd: std::env::temp_dir(),
                 env: vec![],
             })
             .unwrap();
@@ -410,7 +406,7 @@ mod tests {
         #[cfg(not(windows))]
         {
             assert_eq!(spec.command, "sh");
-            assert_eq!(spec.args, vec!["-lc".to_string(), "echo hello".to_string()]);
+            assert_eq!(spec.args, vec!["-c".to_string(), "echo hello".to_string()]);
         }
     }
 }
