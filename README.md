@@ -74,7 +74,7 @@ cargo run -p ulgen-app -- --smoke
 ```
 
 Expected result includes:
-- `Smoke OK: sidebar=Left, keymap=Warp, workspaces=2.`
+- `Smoke OK: sidebar=Left, keymap=Warp, windows=2, active_window_workspaces=2.`
 
 ## Repository Layout
 

@@ -14,6 +14,12 @@
 - User action in UI -> command registry action -> mux request -> backend result -> block update -> notification event.
 - ACP action -> ACP terminal bridge -> mux request -> PTY output -> block + ACP update stream.
 
+## App shell bootstrap and restore
+
+- App shell state defaults to a user-scoped OS path (Linux: `XDG_STATE_HOME/ulgen` or `~/.local/state/ulgen`, macOS: `~/Library/Application Support/Ulgen`, Windows: `LOCALAPPDATA\\Ulgen`) with override via `ULGEN_STATE_PATH`.
+- Startup loads previous window/workspace metadata when the file exists, otherwise bootstraps defaults.
+- Command routing entrypoints are exposed through app-shell command ids (for example `window.new`, `workspace.new`).
+
 ## Stability contracts
 
 - `muxd` RPC methods are versioned.
