@@ -4,6 +4,17 @@
 
 - Project: https://linear.app/ulgen-term/project/ulgen-terminal-v1-085147023568
 
+## Next Up Queue (Manual Snapshot)
+
+Updated: 2026-03-19
+
+1. `ULG-9` (`M1-2`) in review
+2. `ULG-10` (`M1-3`) next planned implementation
+3. `ULG-11` (`M1-4`) after notification service
+
+Update policy:
+- Refresh this queue whenever an issue changes state (`Backlog`/`In Progress`/`In Review`/`Done`) and after each merge.
+
 ## Milestones
 
 - M0 - OSS & Tracking Bootstrap
