@@ -24,14 +24,18 @@ fn main() {
             .expect("window creation should succeed");
     }
 
-    if let Some(idx) = args.iter().position(|a| a == "--new-workspace") {
-        let name = args
-            .get(idx + 1)
-            .cloned()
-            .unwrap_or_else(|| "workspace".to_string());
-        app_shell
-            .route_command(AppShellCommand::CreateWorkspace { name })
-            .expect("workspace creation should succeed");
+    match workspace_name_from_args(&args) {
+        Ok(Some(name)) => {
+            if let Err(err) = app_shell.route_command(AppShellCommand::CreateWorkspace { name }) {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
     }
 
     match command_id_from_args(&args) {
@@ -116,6 +120,24 @@ fn command_id_from_args(args: &[String]) -> Result<Option<String>, String> {
     Ok(Some(value.clone()))
 }
 
+fn workspace_name_from_args(args: &[String]) -> Result<Option<String>, String> {
+    let Some(idx) = args.iter().position(|a| a == "--new-workspace") else {
+        return Ok(None);
+    };
+
+    let Some(value) = args.get(idx + 1) else {
+        return Err("--new-workspace requires a workspace name value".to_string());
+    };
+
+    if value.starts_with('-') {
+        return Err(format!(
+            "--new-workspace requires a workspace name value, got option-like token '{value}'"
+        ));
+    }
+
+    Ok(Some(value.clone()))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -125,7 +147,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::command_id_from_args;
+    use super::{command_id_from_args, workspace_name_from_args};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| v.to_string()).collect()
@@ -154,6 +176,31 @@ mod tests {
     fn rejects_option_like_command_value() {
         let err =
             command_id_from_args(&args(&["ulgen-app", "--command", "--new-window"])).unwrap_err();
+        assert!(err.contains("option-like token"));
+    }
+
+    #[test]
+    fn parses_valid_workspace_name_value() {
+        let parsed =
+            workspace_name_from_args(&args(&["ulgen-app", "--new-workspace", "api"])).unwrap();
+        assert_eq!(parsed, Some("api".to_string()));
+    }
+
+    #[test]
+    fn rejects_missing_workspace_name_value() {
+        let err = workspace_name_from_args(&args(&["ulgen-app", "--new-workspace"])).unwrap_err();
+        assert!(err.contains("--new-workspace requires a workspace name value"));
+    }
+
+    #[test]
+    fn rejects_option_like_workspace_name_value() {
+        let err = workspace_name_from_args(&args(&[
+            "ulgen-app",
+            "--new-workspace",
+            "--command",
+            "window.new",
+        ]))
+        .unwrap_err();
         assert!(err.contains("option-like token"));
     }
 }

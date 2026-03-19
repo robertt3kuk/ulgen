@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -133,7 +134,9 @@ impl AppShell {
 
         let data = serde_json::to_vec_pretty(&self.state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        fs::write(&self.state_path, data)?;
+        let temp_path = temp_save_path(&self.state_path);
+        fs::write(&temp_path, data)?;
+        replace_state_file(&temp_path, &self.state_path)?;
         Ok(())
     }
 
@@ -299,6 +302,47 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn temp_save_path(target: &Path) -> PathBuf {
+    let mut tmp_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("state.json")
+        .to_string();
+    tmp_name.push_str(&format!(".tmp-{}-{}", process::id(), now_ms()));
+    target.with_file_name(tmp_name)
+}
+
+fn replace_state_file(temp_path: &Path, target_path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        return fs::rename(temp_path, target_path);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let backup_path = target_path.with_file_name(format!(
+            "{}.bak-{}",
+            target_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("state.json"),
+            now_ms()
+        ));
+
+        if target_path.exists() {
+            fs::rename(target_path, &backup_path)?;
+            if let Err(err) = fs::rename(temp_path, target_path) {
+                let _ = fs::rename(&backup_path, target_path);
+                return Err(err);
+            }
+            let _ = fs::remove_file(backup_path);
+            return Ok(());
+        }
+
+        return fs::rename(temp_path, target_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +387,37 @@ mod tests {
             restored.state().windows[1].workspaces[1].name,
             "api".to_string()
         );
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn save_replaces_existing_file_with_valid_json() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "first".to_string(),
+            })
+            .unwrap();
+        shell.save().unwrap();
+
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "second".to_string(),
+            })
+            .unwrap();
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        let active_window = &restored.state().windows[restored.state().active_window];
+        assert_eq!(active_window.workspaces.last().unwrap().name, "second");
 
         if path.exists() {
             fs::remove_file(path).unwrap();
