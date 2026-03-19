@@ -85,14 +85,23 @@ pub enum BackendKind {
     WindowsConpty,
 }
 
+/// Default backend for current app usage.
+///
+/// This intentionally resolves to the stable contract backend while native
+/// Unix/ConPTY adapters are still being implemented.
 pub fn default_backend_kind() -> BackendKind {
     contract_backend_kind()
 }
 
+/// Always-available deterministic backend used for contract behavior and tests.
 pub fn contract_backend_kind() -> BackendKind {
     BackendKind::Memory
 }
 
+/// Preferred native backend for the current platform.
+///
+/// Runtime callers should handle `TerminalError::Unsupported` until real native
+/// adapters are fully implemented.
 pub fn runtime_backend_kind() -> BackendKind {
     preferred_platform_backend_kind()
 }
@@ -109,14 +118,20 @@ pub fn preferred_platform_backend_kind() -> BackendKind {
     }
 }
 
+/// Creates the default backend used by current app surfaces.
 pub fn create_default_backend() -> Box<dyn TerminalBackend> {
     create_contract_backend()
 }
 
+/// Creates the deterministic contract backend (`Memory`).
 pub fn create_contract_backend() -> Box<dyn TerminalBackend> {
     create_backend(contract_backend_kind())
 }
 
+/// Creates the native runtime backend for the current platform.
+///
+/// This can currently return `Unsupported` for operations until native PTY
+/// adapters are implemented.
 pub fn create_runtime_backend() -> Box<dyn TerminalBackend> {
     create_backend(runtime_backend_kind())
 }
