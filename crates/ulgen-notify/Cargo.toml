@@ -9,3 +9,4 @@ path = "src/lib.rs"
 
 [dependencies]
 ulgen-domain = { path = "../ulgen-domain" }
+ulgen-settings = { path = "../ulgen-settings" }
