@@ -25,18 +25,8 @@ Thanks for your interest in Ulgen.
 - [ ] Added tests for changed behavior
 - [ ] Updated docs if contracts changed
 - [ ] Passed `cargo test`
-- [ ] Ran CodeRabbit prompt review (`./scripts/coderabbit_codex_review.sh --base master --type all`) and addressed findings
 
 See [AGENTS.md](AGENTS.md) for the full execution rules.
-
-## AI Review Loop (Codex + CodeRabbit)
-
-Use prompt-only mode for Codex-compatible review context:
-
-- Branch/PR diff review: `./scripts/coderabbit_codex_review.sh --base master --type all`
-- Pre-commit local review: `./scripts/coderabbit_codex_review.sh --type uncommitted`
-
-If CodeRabbit responds with a rate-limit message, wait for the reported cooldown and rerun.
 
 ## Commit Style
 
