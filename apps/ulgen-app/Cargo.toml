@@ -9,6 +9,8 @@ name = "ulgen-app"
 path = "src/main.rs"
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 ulgen-domain = { path = "../../crates/ulgen-domain" }
 ulgen-settings = { path = "../../crates/ulgen-settings" }
 ulgen-notify = { path = "../../crates/ulgen-notify" }
