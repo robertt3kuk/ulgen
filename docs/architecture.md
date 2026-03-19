@@ -1,0 +1,21 @@
+# Ulgen Architecture (v1)
+
+## Core layers
+
+1. UI shell (`ulgen-app`): window lifecycle, sidebar, command palette, block views.
+2. Domain (`ulgen-domain`): canonical entities for workspaces, tabs, panes, surfaces, blocks.
+3. Mux daemon (`ulgen-muxd`): persistent multiplexer, detach/attach, socket RPC.
+4. Terminal backend (`ulgen-pty`): OS-specific process control via PTY/ConPTY.
+5. ACP bridge (`ulgen-acp`): external agent session lifecycle and terminal bridging.
+6. Notifications (`ulgen-notify`): in-app event stream plus OS bridge adapters.
+
+## Data flow
+
+- User action in UI -> command registry action -> mux request -> backend result -> block update -> notification event.
+- ACP action -> ACP terminal bridge -> mux request -> PTY output -> block + ACP update stream.
+
+## Stability contracts
+
+- `muxd` RPC methods are versioned.
+- settings schema remains backward compatible per minor release.
+- permission policy defaults are explicit and auditable.

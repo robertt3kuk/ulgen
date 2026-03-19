@@ -1,0 +1,16 @@
+[package]
+name = "ulgen-app"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ulgen-app"
+path = "src/main.rs"
+
+[dependencies]
+ulgen-domain = { path = "../../crates/ulgen-domain" }
+ulgen-settings = { path = "../../crates/ulgen-settings" }
+ulgen-notify = { path = "../../crates/ulgen-notify" }
+ulgen-muxd = { path = "../../crates/ulgen-muxd" }
+ulgen-command = { path = "../../crates/ulgen-command" }

@@ -1,0 +1,31 @@
+name: Task
+description: Implementation task tied to a milestone
+labels: [task]
+body:
+  - type: input
+    id: title
+    attributes:
+      label: Task title
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What will be implemented?
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How
+      description: How will we implement it?
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Acceptance condition
+    validations:
+      required: true

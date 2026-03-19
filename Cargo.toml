@@ -1,0 +1,20 @@
+[workspace]
+members = [
+  "apps/ulgen-app",
+  "crates/ulgen-domain",
+  "crates/ulgen-settings",
+  "crates/ulgen-notify",
+  "crates/ulgen-pty",
+  "crates/ulgen-muxd",
+  "crates/ulgen-acp",
+  "crates/ulgen-command",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/robertt3kuk/ulgen"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
