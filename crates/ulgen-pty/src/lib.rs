@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalId(pub String);
@@ -22,16 +23,27 @@ impl Default for TerminalSize {
 pub struct CommandSpec {
     pub command: String,
     pub args: Vec<String>,
-    pub cwd: String,
+    pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
 }
 
 impl CommandSpec {
     pub fn shell(command: impl Into<String>) -> Self {
+        let command = command.into();
+
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), command.clone()],
+        );
+
+        #[cfg(not(windows))]
+        let (program, args) = ("sh".to_string(), vec!["-lc".to_string(), command.clone()]);
+
         Self {
-            command: command.into(),
-            args: Vec::new(),
-            cwd: "/".to_string(),
+            command: program,
+            args,
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
             env: Vec::new(),
         }
     }
@@ -74,6 +86,18 @@ pub enum BackendKind {
 }
 
 pub fn default_backend_kind() -> BackendKind {
+    runtime_backend_kind()
+}
+
+pub fn contract_backend_kind() -> BackendKind {
+    BackendKind::Memory
+}
+
+pub fn runtime_backend_kind() -> BackendKind {
+    preferred_platform_backend_kind()
+}
+
+pub fn preferred_platform_backend_kind() -> BackendKind {
     #[cfg(windows)]
     {
         return BackendKind::WindowsConpty;
@@ -86,7 +110,15 @@ pub fn default_backend_kind() -> BackendKind {
 }
 
 pub fn create_default_backend() -> Box<dyn TerminalBackend> {
-    create_backend(default_backend_kind())
+    create_runtime_backend()
+}
+
+pub fn create_contract_backend() -> Box<dyn TerminalBackend> {
+    create_backend(contract_backend_kind())
+}
+
+pub fn create_runtime_backend() -> Box<dyn TerminalBackend> {
+    create_backend(runtime_backend_kind())
 }
 
 pub fn create_backend(kind: BackendKind) -> Box<dyn TerminalBackend> {
@@ -199,194 +231,122 @@ impl TerminalBackend for MemoryTerminalBackend {
 }
 
 #[derive(Default)]
-pub struct UnixPtyBackend {
-    inner: Option<MemoryTerminalBackend>,
-}
+pub struct UnixPtyBackend;
 
 impl UnixPtyBackend {
     pub fn new() -> Self {
-        #[cfg(unix)]
-        {
-            return Self {
-                inner: Some(MemoryTerminalBackend::new()),
-            };
-        }
-
-        #[cfg(not(unix))]
-        {
-            Self { inner: None }
-        }
+        Self
     }
 }
 
 impl TerminalBackend for UnixPtyBackend {
-    fn spawn(&mut self, spec: CommandSpec) -> Result<TerminalId, TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "unix-pty",
-                operation: "spawn",
-            });
-        };
-
-        inner.spawn(spec)
+    fn spawn(&mut self, _spec: CommandSpec) -> Result<TerminalId, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "spawn",
+        })
     }
 
-    fn write(&mut self, terminal_id: &TerminalId, input: &str) -> Result<(), TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "unix-pty",
-                operation: "write",
-            });
-        };
-
-        inner.write(terminal_id, input)
+    fn write(&mut self, _terminal_id: &TerminalId, _input: &str) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "write",
+        })
     }
 
     fn resize(
         &mut self,
-        terminal_id: &TerminalId,
-        size: TerminalSize,
+        _terminal_id: &TerminalId,
+        _size: TerminalSize,
     ) -> Result<(), TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "unix-pty",
-                operation: "resize",
-            });
-        };
-
-        inner.resize(terminal_id, size)
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "resize",
+        })
     }
 
-    fn kill(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "unix-pty",
-                operation: "kill",
-            });
-        };
-
-        inner.kill(terminal_id)
+    fn kill(&mut self, _terminal_id: &TerminalId) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "kill",
+        })
     }
 
-    fn output(&self, terminal_id: &TerminalId) -> Result<String, TerminalError> {
-        let Some(inner) = self.inner.as_ref() else {
-            return Err(TerminalError::Unsupported {
-                backend: "unix-pty",
-                operation: "output",
-            });
-        };
-
-        inner.output(terminal_id)
+    fn output(&self, _terminal_id: &TerminalId) -> Result<String, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "output",
+        })
     }
 
     fn wait_for_exit(
         &self,
-        terminal_id: &TerminalId,
+        _terminal_id: &TerminalId,
     ) -> Result<Option<TerminalExitStatus>, TerminalError> {
-        let Some(inner) = self.inner.as_ref() else {
-            return Err(TerminalError::Unsupported {
-                backend: "unix-pty",
-                operation: "wait_for_exit",
-            });
-        };
-
-        inner.wait_for_exit(terminal_id)
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "wait_for_exit",
+        })
     }
 }
 
 #[derive(Default)]
-pub struct WindowsConptyBackend {
-    inner: Option<MemoryTerminalBackend>,
-}
+pub struct WindowsConptyBackend;
 
 impl WindowsConptyBackend {
     pub fn new() -> Self {
-        #[cfg(windows)]
-        {
-            return Self {
-                inner: Some(MemoryTerminalBackend::new()),
-            };
-        }
-
-        #[cfg(not(windows))]
-        {
-            Self { inner: None }
-        }
+        Self
     }
 }
 
 impl TerminalBackend for WindowsConptyBackend {
-    fn spawn(&mut self, spec: CommandSpec) -> Result<TerminalId, TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "windows-conpty",
-                operation: "spawn",
-            });
-        };
-
-        inner.spawn(spec)
+    fn spawn(&mut self, _spec: CommandSpec) -> Result<TerminalId, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "spawn",
+        })
     }
 
-    fn write(&mut self, terminal_id: &TerminalId, input: &str) -> Result<(), TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "windows-conpty",
-                operation: "write",
-            });
-        };
-
-        inner.write(terminal_id, input)
+    fn write(&mut self, _terminal_id: &TerminalId, _input: &str) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "write",
+        })
     }
 
     fn resize(
         &mut self,
-        terminal_id: &TerminalId,
-        size: TerminalSize,
+        _terminal_id: &TerminalId,
+        _size: TerminalSize,
     ) -> Result<(), TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "windows-conpty",
-                operation: "resize",
-            });
-        };
-
-        inner.resize(terminal_id, size)
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "resize",
+        })
     }
 
-    fn kill(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Err(TerminalError::Unsupported {
-                backend: "windows-conpty",
-                operation: "kill",
-            });
-        };
-
-        inner.kill(terminal_id)
+    fn kill(&mut self, _terminal_id: &TerminalId) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "kill",
+        })
     }
 
-    fn output(&self, terminal_id: &TerminalId) -> Result<String, TerminalError> {
-        let Some(inner) = self.inner.as_ref() else {
-            return Err(TerminalError::Unsupported {
-                backend: "windows-conpty",
-                operation: "output",
-            });
-        };
-
-        inner.output(terminal_id)
+    fn output(&self, _terminal_id: &TerminalId) -> Result<String, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "output",
+        })
     }
 
     fn wait_for_exit(
         &self,
-        terminal_id: &TerminalId,
+        _terminal_id: &TerminalId,
     ) -> Result<Option<TerminalExitStatus>, TerminalError> {
-        let Some(inner) = self.inner.as_ref() else {
-            return Err(TerminalError::Unsupported {
-                backend: "windows-conpty",
-                operation: "wait_for_exit",
-            });
-        };
-
-        inner.wait_for_exit(terminal_id)
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "wait_for_exit",
+        })
     }
 }
 
@@ -404,18 +364,53 @@ mod tests {
     }
 
     #[test]
+    fn contract_backend_kind_is_memory() {
+        assert_eq!(contract_backend_kind(), BackendKind::Memory);
+    }
+
+    #[test]
+    fn preferred_platform_backend_kind_matches_target_platform() {
+        #[cfg(windows)]
+        assert_eq!(
+            preferred_platform_backend_kind(),
+            BackendKind::WindowsConpty
+        );
+
+        #[cfg(not(windows))]
+        assert_eq!(preferred_platform_backend_kind(), BackendKind::UnixPty);
+    }
+
+    #[test]
     fn memory_backend_captures_writes() {
         let mut backend = MemoryTerminalBackend::new();
         let id = backend
             .spawn(CommandSpec {
                 command: "echo".to_string(),
                 args: vec!["hello".to_string()],
-                cwd: "/tmp".to_string(),
+                cwd: PathBuf::from("/tmp"),
                 env: vec![],
             })
             .unwrap();
 
         backend.write(&id, "hello\\n").unwrap();
         assert_eq!(backend.output(&id).unwrap(), "hello\\n");
+    }
+
+    #[test]
+    fn command_spec_shell_builds_platform_shell_invocation() {
+        let spec = CommandSpec::shell("echo hello");
+        assert!(!spec.cwd.as_os_str().is_empty());
+
+        #[cfg(windows)]
+        {
+            assert_eq!(spec.command, "cmd.exe");
+            assert_eq!(spec.args, vec!["/C".to_string(), "echo hello".to_string()]);
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(spec.command, "sh");
+            assert_eq!(spec.args, vec!["-lc".to_string(), "echo hello".to_string()]);
+        }
     }
 }

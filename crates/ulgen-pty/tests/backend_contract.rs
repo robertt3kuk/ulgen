@@ -1,13 +1,16 @@
+use std::path::PathBuf;
+
 use ulgen_pty::{
-    create_backend, create_default_backend, BackendKind, CommandSpec, TerminalBackend,
-    TerminalError, TerminalId, TerminalSize,
+    create_backend, create_contract_backend, create_default_backend,
+    preferred_platform_backend_kind, BackendKind, CommandSpec, TerminalBackend, TerminalError,
+    TerminalId, TerminalSize,
 };
 
 fn sample_spec() -> CommandSpec {
     CommandSpec {
         command: "echo".to_string(),
         args: vec!["hello".to_string()],
-        cwd: "/tmp".to_string(),
+        cwd: PathBuf::from("/tmp"),
         env: vec![("ULGEN_TEST".to_string(), "1".to_string())],
     }
 }
@@ -71,13 +74,24 @@ fn memory_backend_matches_contract() {
 }
 
 #[test]
-fn default_platform_backend_matches_contract() {
-    assert_backend_contract(create_default_backend());
+fn contract_backend_matches_contract() {
+    assert_backend_contract(create_contract_backend());
 }
 
 #[test]
-#[cfg(not(windows))]
-fn windows_backend_reports_unsupported_on_non_windows() {
+fn unix_backend_reports_unsupported_until_implemented() {
+    let mut backend = create_backend(BackendKind::UnixPty);
+    assert_eq!(
+        backend.spawn(sample_spec()),
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "spawn"
+        })
+    );
+}
+
+#[test]
+fn windows_backend_reports_unsupported_until_implemented() {
     let mut backend = create_backend(BackendKind::WindowsConpty);
     assert_eq!(
         backend.spawn(sample_spec()),
@@ -89,14 +103,39 @@ fn windows_backend_reports_unsupported_on_non_windows() {
 }
 
 #[test]
-#[cfg(windows)]
-fn unix_backend_reports_unsupported_on_windows() {
-    let mut backend = create_backend(BackendKind::UnixPty);
-    assert_eq!(
-        backend.spawn(sample_spec()),
-        Err(TerminalError::Unsupported {
-            backend: "unix-pty",
-            operation: "spawn"
-        })
-    );
+fn preferred_platform_backend_reports_unsupported_until_implemented() {
+    let preferred_backend = preferred_platform_backend_kind();
+    let expected_backend_name = match preferred_backend {
+        BackendKind::UnixPty => "unix-pty",
+        BackendKind::WindowsConpty => "windows-conpty",
+        BackendKind::Memory => "memory",
+    };
+    let mut backend = create_backend(preferred_backend);
+    let error = backend
+        .spawn(sample_spec())
+        .expect_err("preferred platform backend is not implemented yet");
+
+    match error {
+        TerminalError::Unsupported { backend, operation } => {
+            assert_eq!(operation, "spawn");
+            assert_eq!(backend, expected_backend_name);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn default_runtime_backend_reports_unsupported_until_implemented() {
+    let mut backend = create_default_backend();
+    let error = backend
+        .write(&TerminalId("missing".to_string()), "x")
+        .expect_err("default runtime backend is not implemented yet");
+
+    match error {
+        TerminalError::Unsupported { backend, operation } => {
+            assert_eq!(operation, "write");
+            assert!(backend == "unix-pty" || backend == "windows-conpty");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
