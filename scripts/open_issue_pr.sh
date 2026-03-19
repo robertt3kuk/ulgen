@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 ULG-<id> M<id> \"PR summary title\" [github_issue]"
+  echo "Usage: $0 ULG-<id> M<id> \"PR summary title\" [github_issue] [base_branch]"
   exit 1
 fi
 
@@ -10,6 +10,7 @@ issue="$1"
 milestone="$2"
 title="$3"
 github_issue="${4:-N/A}"
+base_branch="${5:-master}"
 
 pr_title="[${issue}][${milestone}] ${title}"
 
@@ -38,5 +39,5 @@ Workflow and repository process update for ${issue}.
 - Manual checks: scripts syntax checks and branch/PR conventions verified.
 EOF
 
-gh pr create --draft --title "${pr_title}" --body-file "${tmp_body}"
+gh pr create --draft --base "${base_branch}" --title "${pr_title}" --body-file "${tmp_body}"
 rm -f "${tmp_body}"
