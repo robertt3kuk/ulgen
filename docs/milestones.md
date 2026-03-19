@@ -1,5 +1,7 @@
 # Milestones and Sub-Issues
 
+Commit history by milestone: [docs/milestone-commit-journal.md](docs/milestone-commit-journal.md)
+
 ## M0 - OSS & Tracking Bootstrap
 - M0-1 Repository foundation
 - M0-2 README product page

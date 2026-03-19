@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalId(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -9,12 +10,43 @@ pub struct TerminalSize {
     pub rows: u16,
 }
 
+impl Default for TerminalSize {
+    fn default() -> Self {
+        Self {
+            cols: 120,
+            rows: 40,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandSpec {
     pub command: String,
     pub args: Vec<String>,
-    pub cwd: String,
+    pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+}
+
+impl CommandSpec {
+    pub fn shell(command: impl Into<String>) -> Self {
+        let command = command.into();
+
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), command.clone()],
+        );
+
+        #[cfg(not(windows))]
+        let (program, args) = ("sh".to_string(), vec!["-c".to_string(), command.clone()]);
+
+        Self {
+            command: program,
+            args,
+            cwd: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+            env: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +59,10 @@ pub struct TerminalExitStatus {
 pub enum TerminalError {
     NotFound,
     AlreadyExited,
-    Unsupported,
+    Unsupported {
+        backend: &'static str,
+        operation: &'static str,
+    },
 }
 
 pub trait TerminalBackend {
@@ -43,6 +78,72 @@ pub trait TerminalBackend {
     ) -> Result<Option<TerminalExitStatus>, TerminalError>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendKind {
+    Memory,
+    UnixPty,
+    WindowsConpty,
+}
+
+/// Default backend for current app usage.
+///
+/// This intentionally resolves to the stable contract backend while native
+/// Unix/ConPTY adapters are still being implemented.
+pub fn default_backend_kind() -> BackendKind {
+    contract_backend_kind()
+}
+
+/// Always-available deterministic backend used for contract behavior and tests.
+pub fn contract_backend_kind() -> BackendKind {
+    BackendKind::Memory
+}
+
+/// Preferred native backend for the current platform.
+///
+/// Runtime callers should handle `TerminalError::Unsupported` until real native
+/// adapters are fully implemented.
+pub fn runtime_backend_kind() -> BackendKind {
+    preferred_platform_backend_kind()
+}
+
+pub fn preferred_platform_backend_kind() -> BackendKind {
+    #[cfg(windows)]
+    {
+        return BackendKind::WindowsConpty;
+    }
+
+    #[cfg(not(windows))]
+    {
+        BackendKind::UnixPty
+    }
+}
+
+/// Creates the default backend used by current app surfaces.
+pub fn create_default_backend() -> Box<dyn TerminalBackend> {
+    create_contract_backend()
+}
+
+/// Creates the deterministic contract backend (`Memory`).
+pub fn create_contract_backend() -> Box<dyn TerminalBackend> {
+    create_backend(contract_backend_kind())
+}
+
+/// Creates the native runtime backend for the current platform.
+///
+/// This can currently return `Unsupported` for operations until native PTY
+/// adapters are implemented.
+pub fn create_runtime_backend() -> Box<dyn TerminalBackend> {
+    create_backend(runtime_backend_kind())
+}
+
+pub fn create_backend(kind: BackendKind) -> Box<dyn TerminalBackend> {
+    match kind {
+        BackendKind::Memory => Box::new(MemoryTerminalBackend::new()),
+        BackendKind::UnixPty => Box::new(UnixPtyBackend::new()),
+        BackendKind::WindowsConpty => Box::new(WindowsConptyBackend::new()),
+    }
+}
+
 #[derive(Default)]
 pub struct MemoryTerminalBackend {
     next_id: u64,
@@ -52,7 +153,7 @@ pub struct MemoryTerminalBackend {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MemoryTerminalSession {
     _spec: CommandSpec,
-    _size: TerminalSize,
+    size: TerminalSize,
     output: String,
     exit: Option<TerminalExitStatus>,
 }
@@ -71,10 +172,7 @@ impl TerminalBackend for MemoryTerminalBackend {
             id.clone(),
             MemoryTerminalSession {
                 _spec: spec,
-                _size: TerminalSize {
-                    cols: 120,
-                    rows: 40,
-                },
+                size: TerminalSize::default(),
                 output: String::new(),
                 exit: None,
             },
@@ -87,9 +185,11 @@ impl TerminalBackend for MemoryTerminalBackend {
             .sessions
             .get_mut(&terminal_id.0)
             .ok_or(TerminalError::NotFound)?;
+
         if session.exit.is_some() {
             return Err(TerminalError::AlreadyExited);
         }
+
         session.output.push_str(input);
         Ok(())
     }
@@ -103,7 +203,8 @@ impl TerminalBackend for MemoryTerminalBackend {
             .sessions
             .get_mut(&terminal_id.0)
             .ok_or(TerminalError::NotFound)?;
-        session._size = size;
+
+        session.size = size;
         Ok(())
     }
 
@@ -112,10 +213,13 @@ impl TerminalBackend for MemoryTerminalBackend {
             .sessions
             .get_mut(&terminal_id.0)
             .ok_or(TerminalError::NotFound)?;
-        session.exit = Some(TerminalExitStatus {
-            exit_code: None,
-            signal: Some("SIGKILL".to_string()),
-        });
+
+        if session.exit.is_none() {
+            session.exit = Some(TerminalExitStatus {
+                exit_code: None,
+                signal: Some("KILL".to_string()),
+            });
+        }
         Ok(())
     }
 
@@ -124,6 +228,7 @@ impl TerminalBackend for MemoryTerminalBackend {
             .sessions
             .get(&terminal_id.0)
             .ok_or(TerminalError::NotFound)?;
+
         Ok(session.output.clone())
     }
 
@@ -135,7 +240,128 @@ impl TerminalBackend for MemoryTerminalBackend {
             .sessions
             .get(&terminal_id.0)
             .ok_or(TerminalError::NotFound)?;
+
         Ok(session.exit.clone())
+    }
+}
+
+#[derive(Default)]
+pub struct UnixPtyBackend;
+
+impl UnixPtyBackend {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl TerminalBackend for UnixPtyBackend {
+    fn spawn(&mut self, _spec: CommandSpec) -> Result<TerminalId, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "spawn",
+        })
+    }
+
+    fn write(&mut self, _terminal_id: &TerminalId, _input: &str) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "write",
+        })
+    }
+
+    fn resize(
+        &mut self,
+        _terminal_id: &TerminalId,
+        _size: TerminalSize,
+    ) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "resize",
+        })
+    }
+
+    fn kill(&mut self, _terminal_id: &TerminalId) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "kill",
+        })
+    }
+
+    fn output(&self, _terminal_id: &TerminalId) -> Result<String, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "output",
+        })
+    }
+
+    fn wait_for_exit(
+        &self,
+        _terminal_id: &TerminalId,
+    ) -> Result<Option<TerminalExitStatus>, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "unix-pty",
+            operation: "wait_for_exit",
+        })
+    }
+}
+
+#[derive(Default)]
+pub struct WindowsConptyBackend;
+
+impl WindowsConptyBackend {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl TerminalBackend for WindowsConptyBackend {
+    fn spawn(&mut self, _spec: CommandSpec) -> Result<TerminalId, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "spawn",
+        })
+    }
+
+    fn write(&mut self, _terminal_id: &TerminalId, _input: &str) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "write",
+        })
+    }
+
+    fn resize(
+        &mut self,
+        _terminal_id: &TerminalId,
+        _size: TerminalSize,
+    ) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "resize",
+        })
+    }
+
+    fn kill(&mut self, _terminal_id: &TerminalId) -> Result<(), TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "kill",
+        })
+    }
+
+    fn output(&self, _terminal_id: &TerminalId) -> Result<String, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "output",
+        })
+    }
+
+    fn wait_for_exit(
+        &self,
+        _terminal_id: &TerminalId,
+    ) -> Result<Option<TerminalExitStatus>, TerminalError> {
+        Err(TerminalError::Unsupported {
+            backend: "windows-conpty",
+            operation: "wait_for_exit",
+        })
     }
 }
 
@@ -144,18 +370,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_backend_kind_matches_target_platform() {
+        assert_eq!(default_backend_kind(), BackendKind::Memory);
+    }
+
+    #[test]
+    fn contract_backend_kind_is_memory() {
+        assert_eq!(contract_backend_kind(), BackendKind::Memory);
+    }
+
+    #[test]
+    fn preferred_platform_backend_kind_matches_target_platform() {
+        #[cfg(windows)]
+        assert_eq!(
+            preferred_platform_backend_kind(),
+            BackendKind::WindowsConpty
+        );
+
+        #[cfg(not(windows))]
+        assert_eq!(preferred_platform_backend_kind(), BackendKind::UnixPty);
+    }
+
+    #[test]
     fn memory_backend_captures_writes() {
         let mut backend = MemoryTerminalBackend::new();
         let id = backend
             .spawn(CommandSpec {
                 command: "echo".to_string(),
                 args: vec!["hello".to_string()],
-                cwd: "/tmp".to_string(),
+                cwd: std::env::temp_dir(),
                 env: vec![],
             })
             .unwrap();
 
         backend.write(&id, "hello\n").unwrap();
         assert_eq!(backend.output(&id).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn command_spec_shell_builds_platform_shell_invocation() {
+        let spec = CommandSpec::shell("echo hello");
+        assert!(!spec.cwd.as_os_str().is_empty());
+
+        #[cfg(windows)]
+        {
+            assert_eq!(spec.command, "cmd.exe");
+            assert_eq!(spec.args, vec!["/C".to_string(), "echo hello".to_string()]);
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(spec.command, "sh");
+            assert_eq!(spec.args, vec!["-c".to_string(), "echo hello".to_string()]);
+        }
     }
 }

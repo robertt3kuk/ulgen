@@ -63,3 +63,41 @@ An issue is done only when all are true:
 - Acceptance criteria verified
 - Linear issue moved to `Done`
 - Follow-up tasks captured (if needed)
+
+## 8) Next-Issue Selection Logic
+
+Use this sequence to decide what to work on next:
+
+1. If there is an open branch/PR for the current issue, finish that first.
+2. Otherwise select the next issue by milestone order and issue order:
+   - Active milestone first (`M0` -> `M1` -> `M2` -> `M3` -> `M4` -> `M5`)
+   - Inside milestone choose the lowest-number `ULG-*` that is not `Done`
+   - If the next issue is blocked, document the blocker in Linear and move to the next eligible issue
+3. Move selected issue to `In Progress` before coding.
+4. Add/update issue intake note (`what`, `how`, `done when`, assumptions) in Linear.
+
+## 9) Mandatory Deep Second Opinion
+
+Before a PR is considered ready to merge:
+
+1. Run an internal deep review with a high-capability subagent (`xhigh` reasoning).
+2. Prioritize findings by severity and fix all blocking items.
+3. Document review outcome in PR comments.
+
+Process rule:
+- Do not rely on PR bot reviews as the only gate; deep subagent review is required.
+
+## 10) Milestone Commit Journal
+
+Each contributor-authored commit pushed on issue branches must be logged in [docs/milestone-commit-journal.md](docs/milestone-commit-journal.md) before PR refresh/review.
+
+For every entry include:
+- milestone
+- issue
+- commit hash
+- what changed
+- why it changed
+- how it was implemented
+- validation evidence (tests/checks)
+
+Keep entries chronological so anyone can audit what was done and why.

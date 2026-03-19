@@ -95,6 +95,7 @@ impl SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ulgen_pty::{create_runtime_backend, CommandSpec};
 
     #[test]
     fn can_create_and_load_session() {
@@ -102,5 +103,16 @@ mod tests {
         let session = registry.create_session("/tmp/project".to_string());
         let loaded = registry.load_session(&session.session_id);
         assert_eq!(loaded, Some(session));
+    }
+
+    #[test]
+    fn runtime_backend_unsupported_is_propagated_without_panic() {
+        let mut backend = create_runtime_backend();
+        let create_result = backend
+            .spawn(CommandSpec::shell("echo acp"))
+            .map_err(|err| format!("terminal create failed: {err:?}"));
+
+        let err = create_result.expect_err("runtime backend should not be usable yet");
+        assert!(err.contains("Unsupported"));
     }
 }
