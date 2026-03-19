@@ -34,14 +34,18 @@ fn main() {
             .expect("workspace creation should succeed");
     }
 
-    if let Some(idx) = args.iter().position(|a| a == "--command") {
-        let command_id = args
-            .get(idx + 1)
-            .cloned()
-            .unwrap_or_else(|| "workspace.next".to_string());
-        app_shell
-            .route_command_id(&command_id)
-            .expect("command routing should succeed");
+    match command_id_from_args(&args) {
+        Ok(Some(command_id)) => {
+            if let Err(err) = app_shell.route_command_id(&command_id) {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
     }
 
     app_shell
@@ -94,9 +98,62 @@ fn smoke_state_path() -> PathBuf {
     std::env::temp_dir().join(format!("ulgen-smoke-state-{}.json", now_ms()))
 }
 
+fn command_id_from_args(args: &[String]) -> Result<Option<String>, String> {
+    let Some(idx) = args.iter().position(|a| a == "--command") else {
+        return Ok(None);
+    };
+
+    let Some(value) = args.get(idx + 1) else {
+        return Err("--command requires a command id value".to_string());
+    };
+
+    if value.starts_with('-') {
+        return Err(format!(
+            "--command requires a command id value, got option-like token '{value}'"
+        ));
+    }
+
+    Ok(Some(value.clone()))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_id_from_args;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_valid_command_value() {
+        let parsed =
+            command_id_from_args(&args(&["ulgen-app", "--command", "workspace.next"])).unwrap();
+        assert_eq!(parsed, Some("workspace.next".to_string()));
+    }
+
+    #[test]
+    fn returns_none_when_flag_not_provided() {
+        let parsed = command_id_from_args(&args(&["ulgen-app", "--new-window"])).unwrap();
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn rejects_missing_command_value() {
+        let err = command_id_from_args(&args(&["ulgen-app", "--command"])).unwrap_err();
+        assert!(err.contains("--command requires a command id value"));
+    }
+
+    #[test]
+    fn rejects_option_like_command_value() {
+        let err =
+            command_id_from_args(&args(&["ulgen-app", "--command", "--new-window"])).unwrap_err();
+        assert!(err.contains("option-like token"));
+    }
 }
