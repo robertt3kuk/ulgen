@@ -255,10 +255,41 @@ pub fn default_state_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".ulgen")
+    platform_state_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("ulgen"))
         .join("state.json")
+}
+
+fn platform_state_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        return std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .map(PathBuf::from)
+            .map(|root| root.join("Ulgen"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME").map(PathBuf::from).map(|home| {
+            home.join("Library")
+                .join("Application Support")
+                .join("Ulgen")
+        });
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
+            return Some(PathBuf::from(path).join("ulgen"));
+        }
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".local").join("state").join("ulgen"));
+    }
+
+    #[allow(unreachable_code)]
+    None
 }
 
 fn now_ms() -> u64 {

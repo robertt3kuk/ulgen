@@ -16,7 +16,7 @@
 
 ## App shell bootstrap and restore
 
-- App shell state is persisted to `.ulgen/state.json` by default (override via `ULGEN_STATE_PATH`).
+- App shell state defaults to a user-scoped OS path (Linux: `XDG_STATE_HOME/ulgen` or `~/.local/state/ulgen`, macOS: `~/Library/Application Support/Ulgen`, Windows: `LOCALAPPDATA\\Ulgen`) with override via `ULGEN_STATE_PATH`.
 - Startup loads previous window/workspace metadata when the file exists, otherwise bootstraps defaults.
 - Command routing entrypoints are exposed through app-shell command ids (for example `window.new`, `workspace.new`).
 

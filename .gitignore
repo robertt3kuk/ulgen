@@ -1,4 +1,5 @@
 /target
+.ulgen/
 **/*.rs.bk
 .DS_Store
 .idea
