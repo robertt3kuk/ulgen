@@ -388,8 +388,8 @@ mod tests {
             })
             .unwrap();
 
-        backend.write(&id, "hello\\n").unwrap();
-        assert_eq!(backend.output(&id).unwrap(), "hello\\n");
+        backend.write(&id, "hello\n").unwrap();
+        assert_eq!(backend.output(&id).unwrap(), "hello\n");
     }
 
     #[test]
