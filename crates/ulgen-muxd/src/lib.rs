@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use ulgen_domain::{Pane, Surface, Tab, Workspace};
@@ -340,7 +341,7 @@ impl MuxDaemon {
                 Ok(None) => MuxState::new(),
                 Err(MuxDaemonError::Serialization(_))
                 | Err(MuxDaemonError::UnsupportedJournalVersion(_)) => {
-                    quarantine_corrupt_journal(&journal_path)?;
+                    quarantine_corrupt_artifacts(&journal_path)?;
                     MuxState::new()
                 }
                 Err(error) => return Err(error),
@@ -400,27 +401,40 @@ impl MuxRpc for MuxDaemon {
 }
 
 fn load_state_from_journal(path: &Path) -> Result<Option<MuxState>, MuxDaemonError> {
-    if !path.exists() {
+    let Some(source_path) = resolve_journal_source_path(path)? else {
         return Ok(None);
-    }
+    };
 
-    let bytes = fs::read(path)
-        .map_err(|error| MuxDaemonError::Io(format!("read journal {}: {error}", path.display())))?;
+    let bytes = fs::read(&source_path).map_err(|error| {
+        MuxDaemonError::Io(format!("read journal {}: {error}", source_path.display()))
+    })?;
 
     if bytes.is_empty() {
         return Ok(None);
     }
 
     let snapshot: MuxJournalSnapshot = serde_json::from_slice(&bytes).map_err(|error| {
-        MuxDaemonError::Serialization(format!("parse journal {}: {error}", path.display()))
+        MuxDaemonError::Serialization(format!("parse journal {}: {error}", source_path.display()))
     })?;
 
     if snapshot.version != JOURNAL_VERSION {
         return Err(MuxDaemonError::UnsupportedJournalVersion(snapshot.version));
     }
 
+    if !snapshot.state.has_valid_topology() {
+        return Err(MuxDaemonError::Serialization(format!(
+            "invalid topology in journal {}",
+            source_path.display()
+        )));
+    }
+
     let mut state = snapshot.state;
     state.prepare_for_runtime();
+
+    if source_path != path && !path.exists() {
+        let _ = fs::rename(&source_path, path);
+    }
+
     Ok(Some(state))
 }
 
@@ -505,15 +519,44 @@ fn persist_state_to_journal(path: &Path, state: &MuxState) -> Result<(), MuxDaem
         )));
     }
 
+    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            if let Ok(parent_dir) = File::open(parent) {
-                let _ = parent_dir.sync_all();
-            }
+            let parent_dir = File::open(parent).map_err(|error| {
+                MuxDaemonError::Io(format!("open journal dir {}: {error}", parent.display()))
+            })?;
+            parent_dir.sync_all().map_err(|error| {
+                MuxDaemonError::Io(format!("sync journal dir {}: {error}", parent.display()))
+            })?;
         }
     }
 
     Ok(())
+}
+
+fn resolve_journal_source_path(path: &Path) -> Result<Option<PathBuf>, MuxDaemonError> {
+    if path.exists() {
+        return Ok(Some(path.to_path_buf()));
+    }
+
+    let backups = list_sidecar_paths(path, "bak")?;
+    if backups.is_empty() {
+        return Ok(None);
+    }
+
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for candidate in backups {
+        let modified = fs::metadata(&candidate)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        match &best {
+            Some((current, _)) if modified <= *current => {}
+            _ => best = Some((modified, candidate)),
+        }
+    }
+
+    Ok(best.map(|(_, path)| path))
 }
 
 fn temporary_journal_path(path: &Path) -> PathBuf {
@@ -537,11 +580,56 @@ fn journal_sidecar_path(path: &Path, marker: &str) -> PathBuf {
     path.with_file_name(format!("{file_name}.{marker}-{}-{sequence}", process::id()))
 }
 
-fn quarantine_corrupt_journal(path: &Path) -> Result<(), MuxDaemonError> {
-    if !path.exists() {
+fn list_sidecar_paths(path: &Path, marker: &str) -> Result<Vec<PathBuf>, MuxDaemonError> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("mux-state.json");
+    let prefix = format!("{file_name}.{marker}-");
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+
+    if !parent.exists() {
+        return Ok(Vec::new());
+    }
+
+    let entries = fs::read_dir(parent)
+        .map_err(|error| MuxDaemonError::Io(format!("read dir {}: {error}", parent.display())))?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| MuxDaemonError::Io(format!("read dir entry: {error}")))?;
+        let candidate = entry.path();
+        let candidate_name = candidate.file_name().and_then(|name| name.to_str());
+        if candidate_name
+            .map(|name| name.starts_with(&prefix))
+            .unwrap_or(false)
+        {
+            paths.push(candidate);
+        }
+    }
+
+    Ok(paths)
+}
+
+fn quarantine_corrupt_artifacts(path: &Path) -> Result<(), MuxDaemonError> {
+    let mut candidates = Vec::new();
+    if path.exists() {
+        candidates.push(path.to_path_buf());
+    }
+    candidates.extend(list_sidecar_paths(path, "bak")?);
+
+    if candidates.is_empty() {
         return Ok(());
     }
 
+    for candidate in candidates {
+        quarantine_corrupt_path(&candidate)?;
+    }
+
+    Ok(())
+}
+
+fn quarantine_corrupt_path(path: &Path) -> Result<(), MuxDaemonError> {
     let corrupt_path = corrupt_journal_path(path);
     fs::rename(path, &corrupt_path).map_err(|error| {
         MuxDaemonError::Io(format!(
@@ -549,8 +637,7 @@ fn quarantine_corrupt_journal(path: &Path) -> Result<(), MuxDaemonError> {
             path.display(),
             corrupt_path.display()
         ))
-    })?;
-    Ok(())
+    })
 }
 
 fn update_max_seen_id(max_seen: &mut u64, id: &str) {
@@ -611,6 +698,15 @@ mod tests {
         }
 
         matches
+    }
+
+    fn cleanup_journal_artifacts(path: &Path) {
+        let _ = fs::remove_file(path);
+        for marker in ["tmp", "bak", "corrupt"] {
+            for sidecar in find_sidecar_paths(path, marker) {
+                let _ = fs::remove_file(sidecar);
+            }
+        }
     }
 
     #[test]
@@ -691,7 +787,7 @@ mod tests {
             2
         );
 
-        let _ = fs::remove_file(path);
+        cleanup_journal_artifacts(&path);
     }
 
     #[test]
@@ -710,7 +806,7 @@ mod tests {
         assert_eq!(daemon.state.workspaces.len(), 1);
         assert_eq!(daemon.state.workspaces[0].name, "Default");
 
-        let _ = fs::remove_file(path);
+        cleanup_journal_artifacts(&path);
     }
 
     #[test]
@@ -729,7 +825,7 @@ mod tests {
         assert_eq!(json["version"].as_u64(), Some(JOURNAL_VERSION as u64));
         assert!(json["state"]["workspaces"].as_array().unwrap().len() >= 1);
 
-        let _ = fs::remove_file(path);
+        cleanup_journal_artifacts(&path);
     }
 
     #[test]
@@ -747,7 +843,7 @@ mod tests {
         assert!(matches!(result, Err(MuxDaemonError::Io(_))));
         assert_eq!(daemon.state(), &before);
 
-        let _ = fs::remove_file(parent_file_path);
+        cleanup_journal_artifacts(&parent_file_path);
     }
 
     #[test]
@@ -766,6 +862,74 @@ mod tests {
         for sidecar in quarantined {
             let _ = fs::remove_file(sidecar);
         }
+        cleanup_journal_artifacts(&path);
+    }
+
+    #[test]
+    fn missing_primary_restores_from_backup_snapshot() {
+        let path = temp_journal_path("backup-restore");
+        let mut state = MuxState::new();
+        state
+            .handle(MuxRequest::WorkspaceCreate {
+                name: "api".to_string(),
+            })
+            .unwrap();
+
+        let snapshot = MuxJournalSnapshot {
+            version: JOURNAL_VERSION,
+            state,
+        };
+        let backup_path = backup_journal_path(&path);
+        fs::write(&backup_path, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
+
+        let daemon = MuxDaemon::from_journal_path(&path, RestorePolicy::Always).unwrap();
+        assert_eq!(daemon.state().workspaces.len(), 2);
+        assert!(path.exists());
+
+        cleanup_journal_artifacts(&path);
+        cleanup_journal_artifacts(&backup_path);
+    }
+
+    #[test]
+    fn unsupported_version_is_quarantined_and_defaults_are_restored() {
+        let path = temp_journal_path("bad-version");
+        let payload = serde_json::json!({
+            "version": JOURNAL_VERSION + 99,
+            "state": MuxState::new()
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+
+        let daemon = MuxDaemon::from_journal_path(&path, RestorePolicy::Always).unwrap();
+        assert_eq!(daemon.state().workspaces.len(), 1);
+        assert_eq!(daemon.state().workspaces[0].name, "Default");
+        assert!(!path.exists());
+        assert!(!find_sidecar_paths(&path, "corrupt").is_empty());
+
+        cleanup_journal_artifacts(&path);
+    }
+
+    #[test]
+    fn invalid_topology_is_quarantined_and_defaults_are_restored() {
+        let path = temp_journal_path("invalid-topology");
+        let payload = serde_json::json!({
+            "version": JOURNAL_VERSION,
+            "state": {
+                "workspaces": [],
+                "active_workspace": 0,
+                "detached_sessions": {},
+                "sync_scope": null,
+                "next_id": 0
+            }
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+
+        let daemon = MuxDaemon::from_journal_path(&path, RestorePolicy::Always).unwrap();
+        assert_eq!(daemon.state().workspaces.len(), 1);
+        assert_eq!(daemon.state().workspaces[0].name, "Default");
+        assert!(!path.exists());
+        assert!(!find_sidecar_paths(&path, "corrupt").is_empty());
+
+        cleanup_journal_artifacts(&path);
     }
 
     #[test]
@@ -802,6 +966,6 @@ mod tests {
         };
         assert_eq!(workspace_id, "ws-100");
 
-        let _ = fs::remove_file(path);
+        cleanup_journal_artifacts(&path);
     }
 }
