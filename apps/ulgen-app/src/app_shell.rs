@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,10 +10,11 @@ use ulgen_command::{
     command_ids, resolve_keymap, CommandAction, CommandRegistry, KeyBinding,
     KeymapProfile as CommandKeymapProfile, ResolvedKeymap,
 };
-use ulgen_domain::{Pane, Surface, Tab, Workspace};
+use ulgen_domain::{Block, BlockOutputChunk, BlockStatus, Pane, Surface, Tab, Workspace};
 use ulgen_settings::{AppSettings, KeymapOverride, KeymapProfile};
 
-const APP_STATE_VERSION: u32 = 1;
+const APP_STATE_VERSION: u32 = 2;
+const LEGACY_APP_STATE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowState {
@@ -29,6 +31,8 @@ pub struct AppShellState {
     pub active_window: usize,
     #[serde(default)]
     pub settings: AppSettings,
+    #[serde(default)]
+    pub blocks: Vec<Block>,
     pub next_id: u64,
     pub last_started_at_ms: u64,
 }
@@ -56,11 +60,45 @@ struct KeymapCache {
     resolved: ResolvedKeymap,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct BlockIndex {
+    by_id: BTreeMap<String, usize>,
+    by_session: BTreeMap<String, Vec<String>>,
+}
+
+impl BlockIndex {
+    fn from_blocks(blocks: &[Block]) -> Result<Self, String> {
+        let mut index = Self::default();
+        for (position, block) in blocks.iter().enumerate() {
+            index.record(block, position)?;
+        }
+        Ok(index)
+    }
+
+    fn record(&mut self, block: &Block, position: usize) -> Result<(), String> {
+        if self.by_id.contains_key(&block.id) {
+            return Err(format!("duplicate block id detected: {}", block.id));
+        }
+
+        self.by_id.insert(block.id.clone(), position);
+        self.by_session
+            .entry(block.session_id.clone())
+            .or_default()
+            .push(block.id.clone());
+        Ok(())
+    }
+
+    fn position_for_block_id(&self, block_id: &str) -> Option<usize> {
+        self.by_id.get(block_id).copied()
+    }
+}
+
 pub struct AppShell {
     state: AppShellState,
     state_path: PathBuf,
     commands: CommandRegistry,
     keymap_cache: Option<KeymapCache>,
+    block_index: BlockIndex,
 }
 
 impl AppShell {
@@ -70,12 +108,15 @@ impl AppShell {
         } else {
             Self::default_state()
         };
+        let block_index = BlockIndex::from_blocks(&state.blocks)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
         let mut shell = Self {
             state,
             state_path,
             commands: CommandRegistry::new(),
             keymap_cache: None,
+            block_index,
         };
         shell.register_builtin_commands();
         shell.state.last_started_at_ms = now_ms();
@@ -93,6 +134,146 @@ impl AppShell {
 
     pub fn command_registry(&self) -> &CommandRegistry {
         &self.commands
+    }
+
+    pub fn blocks(&self) -> &[Block] {
+        &self.state.blocks
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn block_by_id(&self, block_id: &str) -> Option<&Block> {
+        let position = self.block_index.position_for_block_id(block_id)?;
+        self.state.blocks.get(position)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn blocks_for_session(&self, session_id: &str) -> Vec<&Block> {
+        let Some(block_ids) = self.block_index.by_session.get(session_id) else {
+            return Vec::new();
+        };
+
+        block_ids
+            .iter()
+            .filter_map(|block_id| self.block_by_id(block_id))
+            .collect()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn replay_block_output(&self, block_id: &str) -> Result<String, String> {
+        let block = self
+            .block_by_id(block_id)
+            .ok_or_else(|| format!("block missing: {block_id}"))?;
+        Ok(block
+            .output_chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect())
+    }
+
+    pub fn start_command_block_for_active_session(
+        &mut self,
+        input: impl Into<String>,
+    ) -> Result<String, String> {
+        let session_id = self
+            .active_surface_session_id()
+            .ok_or_else(|| "active surface missing".to_string())?;
+        self.start_command_block_for_session(session_id, input)
+    }
+
+    pub fn start_command_block_for_session(
+        &mut self,
+        session_id: impl Into<String>,
+        input: impl Into<String>,
+    ) -> Result<String, String> {
+        let session_id = session_id.into();
+        if !self.session_exists(&session_id) {
+            return Err(format!("session missing: {session_id}"));
+        }
+
+        let block = Block {
+            id: self.next_id("block"),
+            session_id,
+            input: input.into(),
+            output_chunks: Vec::new(),
+            status: BlockStatus::Running,
+            started_at_ms: now_ms(),
+            finished_at_ms: None,
+        };
+
+        let position = self.state.blocks.len();
+        let block_id = block.id.clone();
+        self.block_index.record(&block, position)?;
+        self.state.blocks.push(block);
+        Ok(block_id)
+    }
+
+    pub fn append_block_output(
+        &mut self,
+        block_id: &str,
+        text: impl Into<String>,
+    ) -> Result<u64, String> {
+        let block = self.block_by_id_mut(block_id)?;
+        if block.status != BlockStatus::Running {
+            return Err(format!(
+                "cannot append output to block in status {:?}",
+                block.status
+            ));
+        }
+
+        let chunk_id = block
+            .output_chunks
+            .last()
+            .map(|chunk| chunk.chunk_id + 1)
+            .unwrap_or(1);
+        block.output_chunks.push(BlockOutputChunk {
+            chunk_id,
+            text: text.into(),
+        });
+        Ok(chunk_id)
+    }
+
+    pub fn finish_block(&mut self, block_id: &str, status: BlockStatus) -> Result<(), String> {
+        if status == BlockStatus::Running {
+            return Err("finish_block requires a terminal status".to_string());
+        }
+
+        let block = self.block_by_id_mut(block_id)?;
+        if block.status != BlockStatus::Running {
+            return Err(format!(
+                "block already finalized with status {:?}",
+                block.status
+            ));
+        }
+
+        block.status = status;
+        block.finished_at_ms = Some(now_ms());
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn rerun_block(&mut self, block_id: &str) -> Result<String, String> {
+        let (session_id, input) = {
+            let block = self
+                .block_by_id(block_id)
+                .ok_or_else(|| format!("block missing: {block_id}"))?;
+            (block.session_id.clone(), block.input.clone())
+        };
+        self.start_command_block_for_session(session_id, input)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn rerun_block_with_edit(
+        &mut self,
+        block_id: &str,
+        updated_input: impl Into<String>,
+    ) -> Result<String, String> {
+        let session_id = {
+            let block = self
+                .block_by_id(block_id)
+                .ok_or_else(|| format!("block missing: {block_id}"))?;
+            block.session_id.clone()
+        };
+        self.start_command_block_for_session(session_id, updated_input)
     }
 
     pub fn resolve_active_keymap(&mut self) -> ResolvedKeymap {
@@ -378,6 +559,7 @@ impl AppShell {
             }],
             active_window: 0,
             settings: AppSettings::default(),
+            blocks: Vec::new(),
             next_id: 6,
             last_started_at_ms: now_ms(),
         }
@@ -387,7 +569,21 @@ impl AppShell {
         let bytes = fs::read(path)?;
         let state = serde_json::from_slice::<AppShellState>(&bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        Ok(state)
+        Self::migrate_loaded_state(state)
+    }
+
+    fn migrate_loaded_state(mut state: AppShellState) -> io::Result<AppShellState> {
+        match state.version {
+            APP_STATE_VERSION => Ok(state),
+            LEGACY_APP_STATE_VERSION => {
+                state.version = APP_STATE_VERSION;
+                Ok(state)
+            }
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported app shell state version: {other}"),
+            )),
+        }
     }
 
     fn active_window_mut(&mut self) -> Result<&mut WindowState, String> {
@@ -420,6 +616,40 @@ impl AppShell {
         let pane = tab.panes.get(tab.active_pane)?;
         let surface = pane.surfaces.get(pane.active_surface)?;
         Some(surface.cwd.clone())
+    }
+
+    fn active_surface_session_id(&self) -> Option<String> {
+        let window = self.state.windows.get(self.state.active_window)?;
+        let workspace = window.workspaces.get(window.active_workspace)?;
+        let tab = workspace.tabs.get(workspace.active_tab)?;
+        let pane = tab.panes.get(tab.active_pane)?;
+        let surface = pane.surfaces.get(pane.active_surface)?;
+        Some(surface.session_id.clone())
+    }
+
+    fn session_exists(&self, session_id: &str) -> bool {
+        self.state.windows.iter().any(|window| {
+            window.workspaces.iter().any(|workspace| {
+                workspace.tabs.iter().any(|tab| {
+                    tab.panes.iter().any(|pane| {
+                        pane.surfaces
+                            .iter()
+                            .any(|surface| surface.session_id == session_id)
+                    })
+                })
+            })
+        })
+    }
+
+    fn block_by_id_mut(&mut self, block_id: &str) -> Result<&mut Block, String> {
+        let position = self
+            .block_index
+            .position_for_block_id(block_id)
+            .ok_or_else(|| format!("block missing: {block_id}"))?;
+        self.state
+            .blocks
+            .get_mut(position)
+            .ok_or_else(|| format!("block index out of bounds: {block_id}"))
     }
 
     fn next_id(&mut self, prefix: &str) -> String {
@@ -563,7 +793,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use ulgen_command::command_ids;
-    use ulgen_domain::{Pane, Surface, Tab};
+    use ulgen_domain::{BlockStatus, Pane, Surface, Tab};
     use ulgen_settings::{KeymapOverride, KeymapProfile};
 
     static TEST_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -881,8 +1111,72 @@ mod tests {
 
         fs::write(&path, legacy_state).unwrap();
         let shell = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(shell.state.version, APP_STATE_VERSION);
         assert_eq!(shell.state.settings.keymap_profile, KeymapProfile::Warp);
         assert!(shell.state.settings.keymap_overrides.is_empty());
+        assert!(shell.state.blocks.is_empty());
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_state_version() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let unsupported = r#"{
+            "version":999,
+            "windows":[
+                {
+                    "id":"window-1",
+                    "title":"Window 1",
+                    "workspaces":[
+                        {
+                            "id":"workspace-1",
+                            "name":"Default",
+                            "tabs":[
+                                {
+                                    "id":"tab-1",
+                                    "title":"main",
+                                    "panes":[
+                                        {
+                                            "id":"pane-1",
+                                            "surfaces":[
+                                                {
+                                                    "id":"surface-1",
+                                                    "session_id":"session-1",
+                                                    "cwd":"/"
+                                                }
+                                            ],
+                                            "active_surface":0
+                                        }
+                                    ],
+                                    "active_pane":0
+                                }
+                            ],
+                            "active_tab":0
+                        }
+                    ],
+                    "active_workspace":0
+                }
+            ],
+            "active_window":0,
+            "blocks":[],
+            "next_id":1,
+            "last_started_at_ms":0
+        }"#;
+
+        fs::write(&path, unsupported).unwrap();
+        let err = AppShell::bootstrap(path.clone())
+            .err()
+            .expect("unsupported version should fail bootstrap");
+        assert!(err
+            .to_string()
+            .contains("unsupported app shell state version"));
 
         if path.exists() {
             fs::remove_file(path).unwrap();
@@ -961,6 +1255,245 @@ mod tests {
             restored.state.windows[restored.state.active_window].active_workspace,
             1
         );
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn block_lifecycle_supports_start_append_finish_and_replay() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let block_id = shell
+            .start_command_block_for_active_session("cargo test --workspace")
+            .unwrap();
+        assert_eq!(shell.blocks().len(), 1);
+
+        let first_chunk_id = shell
+            .append_block_output(&block_id, "running tests...\n")
+            .unwrap();
+        let second_chunk_id = shell.append_block_output(&block_id, "ok\n").unwrap();
+        assert_eq!(first_chunk_id, 1);
+        assert_eq!(second_chunk_id, 2);
+
+        shell
+            .finish_block(&block_id, BlockStatus::Succeeded)
+            .unwrap();
+
+        let block = shell.block_by_id(&block_id).unwrap();
+        assert_eq!(block.status, BlockStatus::Succeeded);
+        assert!(block.finished_at_ms.is_some());
+        assert_eq!(block.output_chunks.len(), 2);
+        assert_eq!(
+            shell.replay_block_output(&block_id).unwrap(),
+            "running tests...\nok\n"
+        );
+
+        let append_err = shell
+            .append_block_output(&block_id, "late output")
+            .unwrap_err();
+        assert!(append_err.contains("cannot append output"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn block_rerun_and_edit_create_new_running_blocks() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let first_block_id = shell
+            .start_command_block_for_active_session("npm test")
+            .unwrap();
+        shell
+            .finish_block(&first_block_id, BlockStatus::Failed)
+            .unwrap();
+
+        let rerun_block_id = shell.rerun_block(&first_block_id).unwrap();
+        let edited_rerun_block_id = shell
+            .rerun_block_with_edit(&first_block_id, "npm test --watch=false")
+            .unwrap();
+        assert_ne!(first_block_id, rerun_block_id);
+        assert_ne!(first_block_id, edited_rerun_block_id);
+
+        let session_id = shell
+            .block_by_id(&first_block_id)
+            .unwrap()
+            .session_id
+            .clone();
+        let session_blocks = shell.blocks_for_session(&session_id);
+        assert_eq!(session_blocks.len(), 3);
+        assert_eq!(session_blocks[0].input, "npm test");
+        assert_eq!(session_blocks[1].input, "npm test");
+        assert_eq!(session_blocks[2].input, "npm test --watch=false");
+        assert_eq!(session_blocks[1].status, BlockStatus::Running);
+        assert_eq!(session_blocks[2].status, BlockStatus::Running);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn block_state_persists_and_rebuilds_index_on_restore() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let block_id = shell
+            .start_command_block_for_active_session("cargo build")
+            .unwrap();
+        shell
+            .append_block_output(&block_id, "Compiling ulgen\n")
+            .unwrap();
+        shell
+            .finish_block(&block_id, BlockStatus::Succeeded)
+            .unwrap();
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        let restored_block = restored.block_by_id(&block_id).unwrap();
+        assert_eq!(restored_block.input, "cargo build");
+        assert_eq!(restored_block.status, BlockStatus::Succeeded);
+        assert_eq!(
+            restored.replay_block_output(&block_id).unwrap(),
+            "Compiling ulgen\n"
+        );
+
+        let session_id = restored_block.session_id.clone();
+        let session_blocks = restored.blocks_for_session(&session_id);
+        assert_eq!(session_blocks.len(), 1);
+        assert_eq!(session_blocks[0].id, block_id);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_restore_with_duplicate_block_ids() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let duplicate_blocks = r#"{
+            "version":2,
+            "windows":[
+                {
+                    "id":"window-1",
+                    "title":"Window 1",
+                    "workspaces":[
+                        {
+                            "id":"workspace-1",
+                            "name":"Default",
+                            "tabs":[
+                                {
+                                    "id":"tab-1",
+                                    "title":"main",
+                                    "panes":[
+                                        {
+                                            "id":"pane-1",
+                                            "surfaces":[
+                                                {
+                                                    "id":"surface-1",
+                                                    "session_id":"session-1",
+                                                    "cwd":"/"
+                                                }
+                                            ],
+                                            "active_surface":0
+                                        }
+                                    ],
+                                    "active_pane":0
+                                }
+                            ],
+                            "active_tab":0
+                        }
+                    ],
+                    "active_workspace":0
+                }
+            ],
+            "active_window":0,
+            "blocks":[
+                {
+                    "id":"block-1",
+                    "session_id":"session-1",
+                    "input":"echo one",
+                    "output_chunks":[],
+                    "status":"Succeeded",
+                    "started_at_ms":1,
+                    "finished_at_ms":2
+                },
+                {
+                    "id":"block-1",
+                    "session_id":"session-1",
+                    "input":"echo two",
+                    "output_chunks":[],
+                    "status":"Failed",
+                    "started_at_ms":3,
+                    "finished_at_ms":4
+                }
+            ],
+            "next_id":2,
+            "last_started_at_ms":0
+        }"#;
+
+        fs::write(&path, duplicate_blocks).unwrap();
+        let err = AppShell::bootstrap(path.clone())
+            .err()
+            .expect("duplicate block ids should fail bootstrap");
+        assert!(err.to_string().contains("duplicate block id detected"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn block_engine_rejects_missing_targets_and_invalid_transitions() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+
+        let missing_session = shell
+            .start_command_block_for_session("session-missing", "ls")
+            .unwrap_err();
+        assert!(missing_session.contains("session missing"));
+
+        let missing_block = shell
+            .append_block_output("block-missing", "output")
+            .unwrap_err();
+        assert!(missing_block.contains("block missing"));
+
+        let block_id = shell
+            .start_command_block_for_active_session("echo ok")
+            .unwrap();
+        let invalid_status = shell
+            .finish_block(&block_id, BlockStatus::Running)
+            .unwrap_err();
+        assert!(invalid_status.contains("terminal status"));
+        shell
+            .finish_block(&block_id, BlockStatus::Succeeded)
+            .unwrap();
+        let double_finish = shell
+            .finish_block(&block_id, BlockStatus::Cancelled)
+            .unwrap_err();
+        assert!(double_finish.contains("already finalized"));
 
         if path.exists() {
             fs::remove_file(path).unwrap();

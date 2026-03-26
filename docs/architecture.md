@@ -17,10 +17,23 @@
 ## App shell bootstrap and restore
 
 - App shell state defaults to a user-scoped OS path (Linux: `XDG_STATE_HOME/ulgen` or `~/.local/state/ulgen`, macOS: `~/Library/Application Support/Ulgen`, Windows: `LOCALAPPDATA\\Ulgen`) with override via `ULGEN_STATE_PATH`.
-- Startup loads previous window/workspace metadata when the file exists, otherwise bootstraps defaults.
+- Startup loads previous window/workspace metadata and block history when the file exists, otherwise bootstraps defaults.
 - Command routing entrypoints are exposed through app-shell command ids (for example `window.new`, `workspace.new`).
 - Keyboard routing resolves active profile defaults (`Warp`/`Tmux`, lowercase aliases accepted) plus user overrides, then dispatches to command ids.
 - Conflicting key overrides are rejected deterministically and reported while valid mappings remain active.
+
+## Block engine lifecycle (M3-1)
+
+- Block runs are persisted in app-shell state as append-only command history.
+- Runtime index contracts:
+  - block id -> block position lookup
+  - session id -> ordered block id list
+- Block lifecycle APIs in `ulgen-app`:
+  - start command block for active/explicit session
+  - append ordered output chunks (`chunk_id` monotonic per block)
+  - finish with terminal status (`Succeeded`/`Failed`/`Cancelled`)
+  - rerun original input or rerun with edited input
+  - replay merged output and query session-scoped history
 
 ## Stability contracts
 
