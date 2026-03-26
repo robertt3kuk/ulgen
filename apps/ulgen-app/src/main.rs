@@ -75,59 +75,13 @@ fn main() {
         }
     }
 
-    let run_command = match run_command_from_args(&args) {
-        Ok(value) => value,
+    let run_block_id = match apply_run_command_args(&mut app_shell, &args) {
+        Ok(block_id) => block_id,
         Err(err) => {
             eprintln!("error: {err}");
             std::process::exit(2);
         }
     };
-    let run_output = match run_output_from_args(&args) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("error: {err}");
-            std::process::exit(2);
-        }
-    };
-    let run_status = match run_status_from_args(&args) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("error: {err}");
-            std::process::exit(2);
-        }
-    };
-
-    if run_command.is_none() && (run_output.is_some() || run_status.is_some()) {
-        eprintln!("error: --run-output and --run-status require --run-command");
-        std::process::exit(2);
-    }
-
-    let mut run_block_id = None;
-    if let Some(input) = run_command {
-        let block_id = match app_shell.start_command_block_for_active_session(input) {
-            Ok(block_id) => block_id,
-            Err(err) => {
-                eprintln!("error: {err}");
-                std::process::exit(2);
-            }
-        };
-
-        if let Some(output) = run_output {
-            if let Err(err) = app_shell.append_block_output(&block_id, output) {
-                eprintln!("error: {err}");
-                std::process::exit(2);
-            }
-        }
-
-        if let Some(status) = run_status {
-            if let Err(err) = app_shell.finish_block(&block_id, status) {
-                eprintln!("error: {err}");
-                std::process::exit(2);
-            }
-        }
-
-        run_block_id = Some(block_id);
-    }
 
     app_shell
         .save()
@@ -318,6 +272,33 @@ fn run_status_from_args(args: &[String]) -> Result<Option<BlockStatus>, String> 
     Ok(Some(status))
 }
 
+fn apply_run_command_args(
+    app_shell: &mut AppShell,
+    args: &[String],
+) -> Result<Option<String>, String> {
+    let run_command = run_command_from_args(args)?;
+    let run_output = run_output_from_args(args)?;
+    let run_status = run_status_from_args(args)?;
+
+    if run_command.is_none() && (run_output.is_some() || run_status.is_some()) {
+        return Err("--run-output and --run-status require --run-command".to_string());
+    }
+
+    let Some(input) = run_command else {
+        return Ok(None);
+    };
+
+    let block_id = app_shell.start_command_block_for_active_session(input)?;
+    if let Some(output) = run_output {
+        app_shell.append_block_output(&block_id, output)?;
+    }
+    if let Some(status) = run_status {
+        app_shell.finish_block(&block_id, status)?;
+    }
+
+    Ok(Some(block_id))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -328,13 +309,29 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_id_from_args, key_chord_from_args, run_command_from_args, run_output_from_args,
-        run_status_from_args, workspace_name_from_args,
+        apply_run_command_args, command_id_from_args, key_chord_from_args, run_command_from_args,
+        run_output_from_args, run_status_from_args, workspace_name_from_args, AppShell,
     };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use ulgen_domain::BlockStatus;
+
+    static TEST_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| v.to_string()).collect()
+    }
+
+    fn temp_state_path() -> PathBuf {
+        let seq = TEST_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "ulgen-main-test-{}-{}-{}.json",
+            process::id(),
+            super::now_ms(),
+            seq
+        ))
     }
 
     #[test]
@@ -458,5 +455,92 @@ mod tests {
         let err =
             run_status_from_args(&args(&["ulgen-app", "--run-status", "pending"])).unwrap_err();
         assert!(err.contains("expects one of"));
+    }
+
+    #[test]
+    fn run_command_flow_records_and_persists_block() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let block_id = apply_run_command_args(
+            &mut shell,
+            &args(&[
+                "ulgen-app",
+                "--run-command",
+                "echo hi",
+                "--run-output",
+                "hi",
+                "--run-status",
+                "succeeded",
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+        let block = shell.block_by_id(&block_id).unwrap();
+        assert_eq!(block.input, "echo hi");
+        assert_eq!(block.output_chunks.len(), 1);
+        assert_eq!(block.output_chunks[0].text, "hi");
+        assert_eq!(block.status, BlockStatus::Succeeded);
+
+        shell.save().unwrap();
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        let restored_block = restored.block_by_id(&block_id).unwrap();
+        assert_eq!(restored_block.input, "echo hi");
+        assert_eq!(restored_block.status, BlockStatus::Succeeded);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn run_command_flow_requires_run_command_for_output_or_status() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let err = apply_run_command_args(&mut shell, &args(&["ulgen-app", "--run-output", "line"]))
+            .unwrap_err();
+        assert!(err.contains("require --run-command"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn run_command_flow_accepts_dash_prefixed_values_with_equals_form() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let block_id = apply_run_command_args(
+            &mut shell,
+            &args(&[
+                "ulgen-app",
+                "--run-command=--new-window",
+                "--run-output=--raw",
+                "--run-status",
+                "failed",
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+
+        let block = shell.block_by_id(&block_id).unwrap();
+        assert_eq!(block.input, "--new-window");
+        assert_eq!(block.output_chunks[0].text, "--raw");
+        assert_eq!(block.status, BlockStatus::Failed);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
     }
 }
