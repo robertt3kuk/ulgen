@@ -245,56 +245,57 @@ fn workspace_name_from_args(args: &[String]) -> Result<Option<String>, String> {
     Ok(Some(value.clone()))
 }
 
-fn run_command_from_args(args: &[String]) -> Result<Option<String>, String> {
-    let Some(idx) = args.iter().position(|a| a == "--run-command") else {
-        return Ok(None);
-    };
+fn flag_value_from_args(
+    args: &[String],
+    flag: &str,
+    value_label: &str,
+    allow_option_like_with_equals: bool,
+) -> Result<Option<String>, String> {
+    let inline_prefix = format!("{flag}=");
 
-    let Some(value) = args.get(idx + 1) else {
-        return Err("--run-command requires a command value".to_string());
-    };
+    for (idx, token) in args.iter().enumerate() {
+        if token == flag {
+            let Some(value) = args.get(idx + 1) else {
+                return Err(format!("{flag} requires a {value_label} value"));
+            };
 
-    if value.starts_with('-') {
-        return Err(format!(
-            "--run-command requires a command value, got option-like token '{value}'"
-        ));
+            if value.starts_with('-') {
+                if allow_option_like_with_equals {
+                    return Err(format!(
+                        "{flag} values that start with '-' must use {flag}=<value>"
+                    ));
+                }
+                return Err(format!(
+                    "{flag} requires a {value_label} value, got option-like token '{value}'"
+                ));
+            }
+
+            return Ok(Some(value.clone()));
+        }
+
+        if let Some(value) = token.strip_prefix(&inline_prefix) {
+            if value.is_empty() {
+                return Err(format!("{flag} requires a {value_label} value"));
+            }
+            return Ok(Some(value.to_string()));
+        }
     }
 
-    Ok(Some(value.clone()))
+    Ok(None)
+}
+
+fn run_command_from_args(args: &[String]) -> Result<Option<String>, String> {
+    flag_value_from_args(args, "--run-command", "command", true)
 }
 
 fn run_output_from_args(args: &[String]) -> Result<Option<String>, String> {
-    let Some(idx) = args.iter().position(|a| a == "--run-output") else {
-        return Ok(None);
-    };
-
-    let Some(value) = args.get(idx + 1) else {
-        return Err("--run-output requires an output value".to_string());
-    };
-
-    if value.starts_with('-') {
-        return Err(format!(
-            "--run-output requires an output value, got option-like token '{value}'"
-        ));
-    }
-
-    Ok(Some(value.clone()))
+    flag_value_from_args(args, "--run-output", "output", true)
 }
 
 fn run_status_from_args(args: &[String]) -> Result<Option<BlockStatus>, String> {
-    let Some(idx) = args.iter().position(|a| a == "--run-status") else {
+    let Some(value) = flag_value_from_args(args, "--run-status", "status", false)? else {
         return Ok(None);
     };
-
-    let Some(value) = args.get(idx + 1) else {
-        return Err("--run-status requires a status value".to_string());
-    };
-
-    if value.starts_with('-') {
-        return Err(format!(
-            "--run-status requires a status value, got option-like token '{value}'"
-        ));
-    }
 
     let normalized = value.trim().to_ascii_lowercase();
     let status = match normalized.as_str() {
@@ -423,13 +424,26 @@ mod tests {
     fn rejects_option_like_run_command_value() {
         let err = run_command_from_args(&args(&["ulgen-app", "--run-command", "--new-window"]))
             .unwrap_err();
-        assert!(err.contains("option-like token"));
+        assert!(err.contains("must use --run-command=<value>"));
+    }
+
+    #[test]
+    fn accepts_option_like_run_command_value_with_equals_form() {
+        let parsed =
+            run_command_from_args(&args(&["ulgen-app", "--run-command=--new-window"])).unwrap();
+        assert_eq!(parsed, Some("--new-window".to_string()));
     }
 
     #[test]
     fn parses_valid_run_output_value() {
         let parsed = run_output_from_args(&args(&["ulgen-app", "--run-output", "line 1"])).unwrap();
         assert_eq!(parsed, Some("line 1".to_string()));
+    }
+
+    #[test]
+    fn accepts_option_like_run_output_value_with_equals_form() {
+        let parsed = run_output_from_args(&args(&["ulgen-app", "--run-output=--raw"])).unwrap();
+        assert_eq!(parsed, Some("--raw".to_string()));
     }
 
     #[test]
