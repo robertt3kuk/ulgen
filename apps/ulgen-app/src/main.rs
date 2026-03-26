@@ -52,9 +52,25 @@ fn main() {
         }
     }
 
+    match key_chord_from_args(&args) {
+        Ok(Some(chord)) => {
+            if let Err(err) = app_shell.route_key_chord(&chord) {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
+    }
+
     app_shell
         .save()
         .expect("saving app shell state should succeed");
+
+    let resolved_keymap = app_shell.resolve_active_keymap();
 
     println!("Ulgen app shell bootstrap is ready.");
     println!("{}", app_shell.startup_summary());
@@ -62,6 +78,12 @@ fn main() {
     println!(
         "Registered commands: {}",
         app_shell.command_registry().search("").len()
+    );
+    println!(
+        "Active keymap: profile={:?}, bindings={}, rejected_overrides={}.",
+        app_shell.state().settings.keymap_profile,
+        resolved_keymap.bindings().len(),
+        resolved_keymap.rejected_overrides().len()
     );
     println!("Run with --smoke to execute a deterministic bootstrap and restore simulation.");
 }
@@ -120,6 +142,24 @@ fn command_id_from_args(args: &[String]) -> Result<Option<String>, String> {
     Ok(Some(value.clone()))
 }
 
+fn key_chord_from_args(args: &[String]) -> Result<Option<String>, String> {
+    let Some(idx) = args.iter().position(|a| a == "--key-chord") else {
+        return Ok(None);
+    };
+
+    let Some(value) = args.get(idx + 1) else {
+        return Err("--key-chord requires a key chord value".to_string());
+    };
+
+    if value.starts_with('-') {
+        return Err(format!(
+            "--key-chord requires a key chord value, got option-like token '{value}'"
+        ));
+    }
+
+    Ok(Some(value.clone()))
+}
+
 fn workspace_name_from_args(args: &[String]) -> Result<Option<String>, String> {
     let Some(idx) = args.iter().position(|a| a == "--new-workspace") else {
         return Ok(None);
@@ -147,7 +187,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_id_from_args, workspace_name_from_args};
+    use super::{command_id_from_args, key_chord_from_args, workspace_name_from_args};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| v.to_string()).collect()
@@ -176,6 +216,25 @@ mod tests {
     fn rejects_option_like_command_value() {
         let err =
             command_id_from_args(&args(&["ulgen-app", "--command", "--new-window"])).unwrap_err();
+        assert!(err.contains("option-like token"));
+    }
+
+    #[test]
+    fn parses_valid_key_chord_value() {
+        let parsed = key_chord_from_args(&args(&["ulgen-app", "--key-chord", "ctrl+b c"])).unwrap();
+        assert_eq!(parsed, Some("ctrl+b c".to_string()));
+    }
+
+    #[test]
+    fn rejects_missing_key_chord_value() {
+        let err = key_chord_from_args(&args(&["ulgen-app", "--key-chord"])).unwrap_err();
+        assert!(err.contains("--key-chord requires a key chord value"));
+    }
+
+    #[test]
+    fn rejects_option_like_key_chord_value() {
+        let err =
+            key_chord_from_args(&args(&["ulgen-app", "--key-chord", "--command"])).unwrap_err();
         assert!(err.contains("option-like token"));
     }
 
