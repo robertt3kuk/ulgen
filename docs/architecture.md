@@ -19,6 +19,8 @@
 - App shell state defaults to a user-scoped OS path (Linux: `XDG_STATE_HOME/ulgen` or `~/.local/state/ulgen`, macOS: `~/Library/Application Support/Ulgen`, Windows: `LOCALAPPDATA\\Ulgen`) with override via `ULGEN_STATE_PATH`.
 - Startup loads previous window/workspace metadata when the file exists, otherwise bootstraps defaults.
 - Command routing entrypoints are exposed through app-shell command ids (for example `window.new`, `workspace.new`).
+- Keyboard routing resolves active profile defaults (`Warp`/`Tmux`, lowercase aliases accepted) plus user overrides, then dispatches to command ids.
+- Conflicting key overrides are rejected deterministically and reported while valid mappings remain active.
 
 ## Stability contracts
 

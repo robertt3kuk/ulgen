@@ -41,3 +41,13 @@ This file tracks commit-level history by milestone so we can audit what changed,
 | `069296d` | `ULG-9` | Default backend set to contract backend; Unix shell helper uses `sh -c`; portable cwd fixture updates. | Ensure default backend is usable now and avoid login-shell pitfalls. | Adjusted backend selection, shell invocation, and test portability. | `ulgen-pty` and workspace tests pass. |
 | `957b3e0` | `ULG-9` | Restored real newline assertion in PTY write smoke test. | Ensure newline behavior is actually tested, not escaped literal. | Replaced `\\n` literal check with actual newline assertion. | `ulgen-pty` and workspace tests pass. |
 | `6752c65` | `ULG-9` | Added backend semantics docs and ACP downstream unsupported-runtime guard test. | Improve clarity and ensure graceful unsupported propagation. | Added function-level docs and ACP test around runtime backend errors. | `ulgen-acp`, `ulgen-pty`, and workspace tests pass. |
+
+## M2 - Hybrid ctmux/cmux Engine
+
+| Commit | Issue | What | Why | How | Validation |
+|---|---|---|---|---|---|
+| `23765fc` | `ULG-12` | Added persistent mux daemon journal and restore flow. | Establish restart-safe multiplexer state as M2 foundation. | Implemented journal persistence, daemon restore path, and deterministic state transitions. | `cargo test --workspace` |
+| `630166c` | `ULG-12` | Hardened journal recovery and restore durability paths. | Prevent corrupted state from breaking startup and recovery. | Added backup restore fallback, corruption quarantine behavior, and restore-policy hardening tests. | `cargo test --workspace` |
+| `cea7115` | `ULG-12` | Updated agent workflow guardrails for dual-analysis merge gate. | Enforce stricter quality controls before milestone merges. | Extended `AGENTS.md` rules to require two xhigh subagent reviews and merge ordering constraints. | Process rule audited in merged PR workflow. |
+| `f8fdf25` | `ULG-13` | Added versioned mux socket control API and Unix transport hardening. | Deliver external control surface for mux state and layouts. | Implemented NDJSON v0 API, request limits, socket path safety checks, and integration tests. | `cargo test --workspace`, PR #11 checks green |
+| `PENDING` | `ULG-14` | Implemented keyboard navigation baseline with dual keymap profiles and remap conflict handling. | Enable keyboard-only workspace/tab/pane operations for M2-4 acceptance. | Added command ID catalog, Warp/Tmux defaults, override resolver + deterministic conflict policy, app-shell key-chord routing/cache, backward-compatible settings aliases, and coverage tests. | `cargo clippy -p ulgen-command -p ulgen-settings -p ulgen-app --all-targets -- -D warnings`; `cargo test --workspace` |
