@@ -19,6 +19,15 @@ Socket path policy:
 - `session.attach`
 - `sync.set_scope`
 
+Behavior notes:
+- `session.detach` and `session.attach` are idempotent in `v0`; unknown sessions are treated as no-op for compatibility.
+- `surface.send_text` resolves targets from the active `sync_scope` and excludes detached sessions internally.
+- If scope resolution yields no attached sessions, `surface.send_text` returns `INVALID_STATE`.
+- `surface.send_text` keeps the `v0` empty result shape (`{}`).
+- `pane.split` direction is interpreted as insertion/focus order in `v0`:
+  - `left`/`up` inserts before the active pane
+  - `right`/`down` inserts after the active pane
+
 ## Planned (not implemented yet)
 
 - `workspace.close`

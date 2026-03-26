@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ pub enum MuxResponse {
     WorkspaceSelect { workspace_id: String },
     PaneSplit { pane_id: String },
     PaneFocus { pane_id: String },
-    SurfaceSendText,
+    SurfaceSendText { targeted_sessions: Vec<String> },
     SessionDetach,
     SessionAttach,
     SyncSetScope,
@@ -189,6 +189,91 @@ impl MuxState {
             })
     }
 
+    fn active_workspace(&self) -> Result<&Workspace, MuxError> {
+        self.workspaces.get(self.active_workspace).ok_or_else(|| {
+            MuxError::InvalidState("active workspace index out of bounds".to_string())
+        })
+    }
+
+    fn active_tab(&self) -> Result<&Tab, MuxError> {
+        let workspace = self.active_workspace()?;
+        workspace
+            .tabs
+            .get(workspace.active_tab)
+            .ok_or_else(|| MuxError::InvalidState("active tab missing".to_string()))
+    }
+
+    fn active_surface(&self) -> Result<&Surface, MuxError> {
+        let tab = self.active_tab()?;
+        let pane = tab
+            .panes
+            .get(tab.active_pane)
+            .ok_or_else(|| MuxError::InvalidState("active pane missing".to_string()))?;
+        pane.surfaces
+            .get(pane.active_surface)
+            .ok_or_else(|| MuxError::InvalidState("active surface missing".to_string()))
+    }
+
+    fn collect_session_ids_from_tab(tab: &Tab, sessions: &mut BTreeSet<String>) {
+        for pane in &tab.panes {
+            if let Some(surface) = pane.surfaces.get(pane.active_surface) {
+                sessions.insert(surface.session_id.clone());
+            }
+        }
+    }
+
+    fn scoped_session_ids(&self, scope: Option<SyncScope>) -> Result<Vec<String>, MuxError> {
+        let mut sessions = BTreeSet::new();
+        match scope {
+            None => {
+                sessions.insert(self.active_surface()?.session_id.clone());
+            }
+            Some(SyncScope::CurrentTab) => {
+                let tab = self.active_tab()?;
+                Self::collect_session_ids_from_tab(tab, &mut sessions);
+            }
+            Some(SyncScope::AllTabs) => {
+                let workspace = self.active_workspace()?;
+                for tab in &workspace.tabs {
+                    Self::collect_session_ids_from_tab(tab, &mut sessions);
+                }
+            }
+            Some(SyncScope::AllWorkspaces) => {
+                for workspace in &self.workspaces {
+                    for tab in &workspace.tabs {
+                        Self::collect_session_ids_from_tab(tab, &mut sessions);
+                    }
+                }
+            }
+        }
+
+        if sessions.is_empty() {
+            return Err(MuxError::InvalidState(
+                "sync scope resolved to no sessions".to_string(),
+            ));
+        }
+
+        Ok(sessions.into_iter().collect())
+    }
+
+    fn topology_session_ids(&self) -> BTreeSet<String> {
+        let mut sessions = BTreeSet::new();
+        for workspace in &self.workspaces {
+            for tab in &workspace.tabs {
+                for pane in &tab.panes {
+                    for surface in &pane.surfaces {
+                        sessions.insert(surface.session_id.clone());
+                    }
+                }
+            }
+        }
+        sessions
+    }
+
+    fn session_in_topology(&self, session_id: &str) -> bool {
+        self.topology_session_ids().contains(session_id)
+    }
+
     fn has_valid_topology(&self) -> bool {
         if self.workspaces.is_empty() {
             return false;
@@ -234,6 +319,10 @@ impl MuxState {
                 }
             }
         }
+
+        let valid_session_ids = self.topology_session_ids();
+        self.detached_sessions
+            .retain(|session_id, _| valid_session_ids.contains(session_id));
 
         self.reconcile_next_id();
     }
@@ -287,7 +376,7 @@ impl MuxRpc for MuxState {
                 self.active_workspace = idx;
                 Ok(MuxResponse::WorkspaceSelect { workspace_id })
             }
-            MuxRequest::PaneSplit { direction: _ } => {
+            MuxRequest::PaneSplit { direction } => {
                 let pane_id = self.generate_id("pane");
                 let surface_id = self.generate_id("surface");
                 let session_id = self.generate_id("session");
@@ -296,16 +385,23 @@ impl MuxRpc for MuxState {
                     .tabs
                     .get_mut(workspace.active_tab)
                     .ok_or_else(|| MuxError::InvalidState("active tab missing".to_string()))?;
-                tab.panes.push(Pane {
-                    id: pane_id.clone(),
-                    surfaces: vec![Surface {
-                        id: surface_id,
-                        session_id,
-                        cwd: "/".to_string(),
-                    }],
-                    active_surface: 0,
-                });
-                tab.active_pane = tab.panes.len() - 1;
+                let insert_at = match direction {
+                    SplitDirection::Left | SplitDirection::Up => tab.active_pane,
+                    SplitDirection::Right | SplitDirection::Down => tab.active_pane + 1,
+                };
+                tab.panes.insert(
+                    insert_at,
+                    Pane {
+                        id: pane_id.clone(),
+                        surfaces: vec![Surface {
+                            id: surface_id,
+                            session_id,
+                            cwd: "/".to_string(),
+                        }],
+                        active_surface: 0,
+                    },
+                );
+                tab.active_pane = insert_at;
                 Ok(MuxResponse::PaneSplit { pane_id })
             }
             MuxRequest::PaneFocus { pane_id } => {
@@ -322,10 +418,26 @@ impl MuxRpc for MuxState {
                 tab.active_pane = pane_index;
                 Ok(MuxResponse::PaneFocus { pane_id })
             }
-            MuxRequest::SurfaceSendText { text: _ } => Ok(MuxResponse::SurfaceSendText),
+            MuxRequest::SurfaceSendText { text: _ } => {
+                let scoped_session_ids = self.scoped_session_ids(self.sync_scope)?;
+                let targeted_sessions = scoped_session_ids
+                    .into_iter()
+                    .filter(|session_id| !self.detached_sessions.contains_key(session_id))
+                    .collect::<Vec<_>>();
+
+                if targeted_sessions.is_empty() {
+                    return Err(MuxError::InvalidState(
+                        "no attached sessions available for the current sync scope".to_string(),
+                    ));
+                }
+
+                Ok(MuxResponse::SurfaceSendText { targeted_sessions })
+            }
             MuxRequest::SessionDetach { session_id } => {
-                self.detached_sessions
-                    .insert(session_id, "detached".to_string());
+                if self.session_in_topology(&session_id) {
+                    self.detached_sessions
+                        .insert(session_id, "detached".to_string());
+                }
                 Ok(MuxResponse::SessionDetach)
             }
             MuxRequest::SessionAttach { session_id } => {
@@ -769,6 +881,95 @@ mod tests {
     }
 
     #[test]
+    fn split_direction_controls_insert_position() {
+        let mut mux = MuxState::new();
+        let original_pane_id = mux.workspaces[mux.active_workspace].tabs[0].panes[0]
+            .id
+            .clone();
+
+        let right_split = mux
+            .handle(MuxRequest::PaneSplit {
+                direction: SplitDirection::Right,
+            })
+            .unwrap();
+        let right_pane_id = match right_split {
+            MuxResponse::PaneSplit { pane_id } => pane_id,
+            _ => panic!("unexpected response"),
+        };
+        assert_eq!(mux.workspaces[mux.active_workspace].tabs[0].active_pane, 1);
+        assert_eq!(
+            mux.workspaces[mux.active_workspace].tabs[0].panes[1].id,
+            right_pane_id
+        );
+
+        mux.handle(MuxRequest::PaneFocus {
+            pane_id: original_pane_id,
+        })
+        .unwrap();
+        let left_split = mux
+            .handle(MuxRequest::PaneSplit {
+                direction: SplitDirection::Left,
+            })
+            .unwrap();
+        let left_pane_id = match left_split {
+            MuxResponse::PaneSplit { pane_id } => pane_id,
+            _ => panic!("unexpected response"),
+        };
+        assert_eq!(mux.workspaces[mux.active_workspace].tabs[0].active_pane, 0);
+        assert_eq!(
+            mux.workspaces[mux.active_workspace].tabs[0].panes[0].id,
+            left_pane_id
+        );
+
+        let mut mux_vertical = MuxState::new();
+        let original_vertical = mux_vertical.workspaces[mux_vertical.active_workspace].tabs[0]
+            .panes[0]
+            .id
+            .clone();
+
+        let down_split = mux_vertical
+            .handle(MuxRequest::PaneSplit {
+                direction: SplitDirection::Down,
+            })
+            .unwrap();
+        let down_pane_id = match down_split {
+            MuxResponse::PaneSplit { pane_id } => pane_id,
+            _ => panic!("unexpected response"),
+        };
+        assert_eq!(
+            mux_vertical.workspaces[mux_vertical.active_workspace].tabs[0].active_pane,
+            1
+        );
+        assert_eq!(
+            mux_vertical.workspaces[mux_vertical.active_workspace].tabs[0].panes[1].id,
+            down_pane_id
+        );
+
+        mux_vertical
+            .handle(MuxRequest::PaneFocus {
+                pane_id: original_vertical,
+            })
+            .unwrap();
+        let up_split = mux_vertical
+            .handle(MuxRequest::PaneSplit {
+                direction: SplitDirection::Up,
+            })
+            .unwrap();
+        let up_pane_id = match up_split {
+            MuxResponse::PaneSplit { pane_id } => pane_id,
+            _ => panic!("unexpected response"),
+        };
+        assert_eq!(
+            mux_vertical.workspaces[mux_vertical.active_workspace].tabs[0].active_pane,
+            0
+        );
+        assert_eq!(
+            mux_vertical.workspaces[mux_vertical.active_workspace].tabs[0].panes[0].id,
+            up_pane_id
+        );
+    }
+
+    #[test]
     fn focus_selects_requested_pane() {
         let mut mux = MuxState::new();
         let original_pane_id = mux.workspaces[mux.active_workspace].tabs[0].panes[0]
@@ -790,6 +991,227 @@ mod tests {
             pane_id: "pane-missing".to_string(),
         });
         assert!(matches!(result, Err(MuxError::NotFound(_))));
+    }
+
+    #[test]
+    fn detach_attach_is_idempotent_and_unknown_ids_are_noop() {
+        let mut mux = MuxState::new();
+        let session_id = mux.workspaces[mux.active_workspace].tabs[0].panes[0].surfaces[0]
+            .session_id
+            .clone();
+
+        mux.handle(MuxRequest::SessionDetach {
+            session_id: "session-missing".to_string(),
+        })
+        .unwrap();
+        assert!(!mux.detached_sessions.contains_key("session-missing"));
+
+        mux.handle(MuxRequest::SessionDetach {
+            session_id: session_id.clone(),
+        })
+        .unwrap();
+        assert!(mux.detached_sessions.contains_key(&session_id));
+
+        mux.handle(MuxRequest::SessionDetach {
+            session_id: session_id.clone(),
+        })
+        .unwrap();
+        assert_eq!(mux.detached_sessions.len(), 1);
+
+        mux.handle(MuxRequest::SessionAttach {
+            session_id: session_id.clone(),
+        })
+        .unwrap();
+        assert!(!mux.detached_sessions.contains_key(&session_id));
+
+        mux.handle(MuxRequest::SessionAttach {
+            session_id: session_id.clone(),
+        })
+        .unwrap();
+        assert!(!mux.detached_sessions.contains_key(&session_id));
+
+        mux.handle(MuxRequest::SessionAttach {
+            session_id: "session-missing".to_string(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn surface_send_text_targets_scope_and_skips_detached_sessions() {
+        let mut mux = MuxState::new();
+        let workspace0_id = mux.workspaces[0].id.clone();
+        let session_one = mux.workspaces[0].tabs[0].panes[0].surfaces[0]
+            .session_id
+            .clone();
+
+        mux.handle(MuxRequest::PaneSplit {
+            direction: SplitDirection::Right,
+        })
+        .unwrap();
+        let session_two = mux.workspaces[0].tabs[0].panes[1].surfaces[0]
+            .session_id
+            .clone();
+
+        let created = mux
+            .handle(MuxRequest::WorkspaceCreate {
+                name: "ops".to_string(),
+            })
+            .unwrap();
+        let workspace1_id = match created {
+            MuxResponse::WorkspaceCreate { workspace } => workspace.id,
+            _ => panic!("unexpected response"),
+        };
+        let session_three = mux.workspaces[1].tabs[0].panes[0].surfaces[0]
+            .session_id
+            .clone();
+
+        mux.handle(MuxRequest::WorkspaceSelect {
+            workspace_id: workspace0_id,
+        })
+        .unwrap();
+        mux.handle(MuxRequest::SyncSetScope {
+            scope: Some(SyncScope::CurrentTab),
+        })
+        .unwrap();
+        let current_tab_targets = mux
+            .handle(MuxRequest::SurfaceSendText {
+                text: "echo hi".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            current_tab_targets,
+            MuxResponse::SurfaceSendText {
+                targeted_sessions: vec![session_one.clone(), session_two.clone()],
+            }
+        );
+
+        mux.handle(MuxRequest::SessionDetach {
+            session_id: session_two.clone(),
+        })
+        .unwrap();
+        let after_detach = mux
+            .handle(MuxRequest::SurfaceSendText {
+                text: "echo hi".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            after_detach,
+            MuxResponse::SurfaceSendText {
+                targeted_sessions: vec![session_one.clone()],
+            }
+        );
+
+        let extra_tab_id = mux.generate_id("tab");
+        let extra_pane_id = mux.generate_id("pane");
+        let extra_surface_id = mux.generate_id("surface");
+        let extra_session = mux.generate_id("session");
+        {
+            let workspace = mux.active_workspace_mut().unwrap();
+            workspace.tabs.push(Tab {
+                id: extra_tab_id,
+                title: "extra".to_string(),
+                panes: vec![Pane {
+                    id: extra_pane_id,
+                    surfaces: vec![Surface {
+                        id: extra_surface_id,
+                        session_id: extra_session.clone(),
+                        cwd: "/".to_string(),
+                    }],
+                    active_surface: 0,
+                }],
+                active_pane: 0,
+            });
+        }
+
+        mux.handle(MuxRequest::SyncSetScope {
+            scope: Some(SyncScope::AllTabs),
+        })
+        .unwrap();
+        let all_tabs_targets = mux
+            .handle(MuxRequest::SurfaceSendText {
+                text: "echo hi".to_string(),
+            })
+            .unwrap();
+        let mut actual_tab_targets = match all_tabs_targets {
+            MuxResponse::SurfaceSendText { targeted_sessions } => targeted_sessions,
+            _ => panic!("unexpected response variant"),
+        };
+        actual_tab_targets.sort();
+        let mut expected_tab_targets = vec![session_one.clone(), extra_session.clone()];
+        expected_tab_targets.sort();
+        assert_eq!(actual_tab_targets, expected_tab_targets);
+
+        mux.handle(MuxRequest::SyncSetScope {
+            scope: Some(SyncScope::AllWorkspaces),
+        })
+        .unwrap();
+        let all_workspaces_targets = mux
+            .handle(MuxRequest::SurfaceSendText {
+                text: "echo hi".to_string(),
+            })
+            .unwrap();
+        let mut actual_targets = match all_workspaces_targets {
+            MuxResponse::SurfaceSendText { targeted_sessions } => targeted_sessions,
+            _ => panic!("unexpected response variant"),
+        };
+        actual_targets.sort();
+        let mut expected_targets = vec![session_one, session_three, extra_session];
+        expected_targets.sort();
+        assert_eq!(actual_targets, expected_targets);
+
+        mux.handle(MuxRequest::WorkspaceSelect {
+            workspace_id: workspace1_id,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn surface_send_text_errors_when_scope_has_only_detached_sessions() {
+        let mut mux = MuxState::new();
+        let session_id = mux.workspaces[0].tabs[0].panes[0].surfaces[0]
+            .session_id
+            .clone();
+        mux.handle(MuxRequest::SessionDetach { session_id })
+            .unwrap();
+
+        let result = mux.handle(MuxRequest::SurfaceSendText {
+            text: "echo blocked".to_string(),
+        });
+        assert!(matches!(result, Err(MuxError::InvalidState(_))));
+    }
+
+    #[test]
+    fn detach_attach_persists_across_daemon_restore() {
+        let path = temp_journal_path("detach-attach-persist");
+        let session_id = {
+            let mut daemon = MuxDaemon::from_journal_path(&path, RestorePolicy::Always).unwrap();
+            let session = daemon.state().workspaces[0].tabs[0].panes[0].surfaces[0]
+                .session_id
+                .clone();
+            daemon
+                .handle_persistent(MuxRequest::SessionDetach {
+                    session_id: session.clone(),
+                })
+                .unwrap();
+            session
+        };
+
+        let mut restored = MuxDaemon::from_journal_path(&path, RestorePolicy::Always).unwrap();
+        assert!(restored.state().detached_sessions.contains_key(&session_id));
+
+        restored
+            .handle_persistent(MuxRequest::SessionAttach {
+                session_id: session_id.clone(),
+            })
+            .unwrap();
+
+        let final_state = MuxDaemon::from_journal_path(&path, RestorePolicy::Always).unwrap();
+        assert!(!final_state
+            .state()
+            .detached_sessions
+            .contains_key(&session_id));
+
+        cleanup_journal_artifacts(&path);
     }
 
     #[test]
@@ -1011,7 +1433,8 @@ mod tests {
             MuxResponse::WorkspaceCreate { workspace } => workspace.id,
             _ => panic!("unexpected response"),
         };
-        assert_eq!(workspace_id, "ws-100");
+        assert_eq!(workspace_id, "ws-46");
+        assert!(!daemon.state().detached_sessions.contains_key("session-99"));
 
         cleanup_journal_artifacts(&path);
     }
