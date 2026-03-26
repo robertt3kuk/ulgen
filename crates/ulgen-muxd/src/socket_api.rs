@@ -469,10 +469,12 @@ fn map_response_to_result(response: MuxResponse) -> Value {
         MuxResponse::WorkspaceSelect { workspace_id } => json!({ "workspace_id": workspace_id }),
         MuxResponse::PaneSplit { pane_id } => json!({ "pane_id": pane_id }),
         MuxResponse::PaneFocus { pane_id } => json!({ "pane_id": pane_id }),
-        MuxResponse::SurfaceSendText
+        MuxResponse::SurfaceSendText { .. }
         | MuxResponse::SessionDetach
         | MuxResponse::SessionAttach
-        | MuxResponse::SyncSetScope => json!({}),
+        | MuxResponse::SyncSetScope => {
+            json!({})
+        }
     }
 }
 
@@ -688,6 +690,41 @@ mod tests {
         );
         assert!(response.ok);
         assert_eq!(response.result.unwrap()["pane_id"].as_str(), Some("pane-3"));
+    }
+
+    #[test]
+    fn line_handler_surface_send_text_keeps_v0_empty_result_shape() {
+        let mut mux = MuxState::new();
+        let _ = handle_rpc_line(
+            &mut mux,
+            r#"{"id":"req-1","v":"v0","method":"pane.split","params":{"direction":"right"}}"#,
+            DEFAULT_MAX_REQUEST_BYTES,
+        );
+        let _ = handle_rpc_line(
+            &mut mux,
+            r#"{"id":"req-2","v":"v0","method":"sync.set_scope","params":{"scope":"current_tab"}}"#,
+            DEFAULT_MAX_REQUEST_BYTES,
+        );
+
+        let response = handle_rpc_line(
+            &mut mux,
+            r#"{"id":"req-3","v":"v0","method":"surface.send_text","params":{"text":"echo hi"}}"#,
+            DEFAULT_MAX_REQUEST_BYTES,
+        );
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap(), json!({}));
+    }
+
+    #[test]
+    fn line_handler_session_detach_unknown_session_is_noop_in_v0() {
+        let mut mux = MuxState::new();
+        let response = handle_rpc_line(
+            &mut mux,
+            r#"{"id":"req-1","v":"v0","method":"session.detach","params":{"session_id":"session-missing"}}"#,
+            DEFAULT_MAX_REQUEST_BYTES,
+        );
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap(), json!({}));
     }
 
     #[test]
