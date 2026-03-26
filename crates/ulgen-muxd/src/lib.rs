@@ -12,6 +12,13 @@ use ulgen_domain::{Pane, Surface, Tab, Workspace};
 static JOURNAL_TMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const JOURNAL_VERSION: u32 = 1;
 
+mod socket_api;
+
+pub use socket_api::{
+    handle_rpc_line, serve_connection, serve_unix_socket_once, RpcErrorBody, RpcErrorCode,
+    RpcResponseEnvelope, SocketApiError, DEFAULT_MAX_REQUEST_BYTES, RPC_VERSION_V0,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitDirection {
     Left,
@@ -33,6 +40,7 @@ pub enum MuxRequest {
     WorkspaceCreate { name: String },
     WorkspaceSelect { workspace_id: String },
     PaneSplit { direction: SplitDirection },
+    PaneFocus { pane_id: String },
     SurfaceSendText { text: String },
     SessionDetach { session_id: String },
     SessionAttach { session_id: String },
@@ -54,6 +62,7 @@ pub enum MuxResponse {
     WorkspaceCreate { workspace: Workspace },
     WorkspaceSelect { workspace_id: String },
     PaneSplit { pane_id: String },
+    PaneFocus { pane_id: String },
     SurfaceSendText,
     SessionDetach,
     SessionAttach,
@@ -298,6 +307,20 @@ impl MuxRpc for MuxState {
                 });
                 tab.active_pane = tab.panes.len() - 1;
                 Ok(MuxResponse::PaneSplit { pane_id })
+            }
+            MuxRequest::PaneFocus { pane_id } => {
+                let workspace = self.active_workspace_mut()?;
+                let tab = workspace
+                    .tabs
+                    .get_mut(workspace.active_tab)
+                    .ok_or_else(|| MuxError::InvalidState("active tab missing".to_string()))?;
+                let pane_index = tab
+                    .panes
+                    .iter()
+                    .position(|pane| pane.id == pane_id)
+                    .ok_or_else(|| MuxError::NotFound("pane not found".to_string()))?;
+                tab.active_pane = pane_index;
+                Ok(MuxResponse::PaneFocus { pane_id })
             }
             MuxRequest::SurfaceSendText { text: _ } => Ok(MuxResponse::SurfaceSendText),
             MuxRequest::SessionDetach { session_id } => {
@@ -746,6 +769,30 @@ mod tests {
     }
 
     #[test]
+    fn focus_selects_requested_pane() {
+        let mut mux = MuxState::new();
+        let original_pane_id = mux.workspaces[mux.active_workspace].tabs[0].panes[0]
+            .id
+            .clone();
+
+        mux.handle(MuxRequest::PaneSplit {
+            direction: SplitDirection::Right,
+        })
+        .unwrap();
+
+        mux.handle(MuxRequest::PaneFocus {
+            pane_id: original_pane_id.clone(),
+        })
+        .unwrap();
+        assert_eq!(mux.workspaces[mux.active_workspace].tabs[0].active_pane, 0);
+
+        let result = mux.handle(MuxRequest::PaneFocus {
+            pane_id: "pane-missing".to_string(),
+        });
+        assert!(matches!(result, Err(MuxError::NotFound(_))));
+    }
+
+    #[test]
     fn daemon_persists_and_restores_topology() {
         let path = temp_journal_path("restore");
         let ws_id = {
@@ -823,7 +870,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&contents).unwrap();
 
         assert_eq!(json["version"].as_u64(), Some(JOURNAL_VERSION as u64));
-        assert!(json["state"]["workspaces"].as_array().unwrap().len() >= 1);
+        assert!(!json["state"]["workspaces"].as_array().unwrap().is_empty());
 
         cleanup_journal_artifacts(&path);
     }
