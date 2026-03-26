@@ -37,6 +37,10 @@ No coding starts until the issue has a clear implementation target.
    - Acceptance criteria are satisfied
    - Relevant tests pass
    - Docs are updated when contracts/behavior change
+4. Before requesting/keeping review, run explicit option analysis:
+   - Compare at least two implementation approaches.
+   - Record chosen approach and tradeoffs in PR/issue notes.
+   - Proceed only after self-check confirms the chosen approach best fits scope/risk.
 
 ## 5) Milestone Handling
 
@@ -76,16 +80,23 @@ Use this sequence to decide what to work on next:
 3. Move selected issue to `In Progress` before coding.
 4. Add/update issue intake note (`what`, `how`, `done when`, assumptions) in Linear.
 
-## 9) Mandatory Deep Second Opinion
+Hard rule:
+- Do not begin implementation for the next issue until the current issue PR is merged and post-merge sync (`master` pull + Linear `Done`) is complete.
+
+## 9) Mandatory Dual Deep Analysis Gate
 
 Before a PR is considered ready to merge:
 
-1. Run an internal deep review with a high-capability subagent (`xhigh` reasoning).
-2. Prioritize findings by severity and fix all blocking items.
-3. Document review outcome in PR comments.
+1. Run internal deep analysis with **two** high-capability subagents (`xhigh` reasoning) in parallel:
+   - Subagent A: implementation quality/risk review of current diff.
+   - Subagent B: architecture/alternative approach + tradeoff assessment.
+2. Compare both analyses with your own review and decide the best path with explicit tradeoffs.
+3. Prioritize findings by severity and fix all blocking items.
+4. Re-run analysis/review in a loop until findings are satisfactory for project needs.
+5. Document both analyses, decisions, and final satisfaction verdict in PR comments.
 
 Process rule:
-- Do not rely on PR bot reviews as the only gate; deep subagent review is required.
+- Do not rely on PR bot reviews as the only gate; the dual-subagent analysis loop is required.
 
 ## 10) Milestone Commit Journal
 
