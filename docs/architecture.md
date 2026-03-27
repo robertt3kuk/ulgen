@@ -56,6 +56,16 @@
 - Executing a palette item must route through existing command/sidebar handlers and record recency history.
 - Recent palette selections are persisted in app state for restore and next-start discoverability.
 
+## Block notification contract (M3-4)
+
+- Block lifecycle publishes notification events on terminal status transitions:
+  - `Succeeded` -> `TaskDone`
+  - `Failed`/`Cancelled` -> `TaskFailed`
+  - explicit approval gate -> `ApprovalRequired`
+- Notification events carry `block_id` for deep-link resolution back into app shell context.
+- App shell exposes deterministic block navigation resolution using `block_id -> session -> window/workspace/tab/pane`.
+- Notification transport policy remains driven by settings (`in-app`, `os`, or both) via `NotificationBus`.
+
 ## Stability contracts
 
 - `muxd` RPC methods are versioned.
