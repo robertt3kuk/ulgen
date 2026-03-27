@@ -83,20 +83,20 @@ Use this sequence to decide what to work on next:
 Hard rule:
 - Do not begin implementation for the next issue until the current issue PR is merged and post-merge sync (`master` pull + Linear `Done`) is complete.
 
-## 9) Mandatory Dual Deep Analysis Gate
+## 9) Mandatory Dual-Loop Deep Analysis Gate
 
 Before a PR is considered ready to merge:
 
-1. Run internal deep analysis with **two** high-capability subagents (`xhigh` reasoning) in parallel:
-   - Subagent A: implementation quality/risk review of current diff.
-   - Subagent B: architecture/alternative approach + tradeoff assessment.
-2. Compare both analyses with your own review and decide the best path with explicit tradeoffs.
-3. Prioritize findings by severity and fix all blocking items.
-4. Re-run analysis/review in a loop until findings are satisfactory for project needs.
-5. Document both analyses, decisions, and final satisfaction verdict in PR comments.
+1. Run **Loop A (Twin Risk Pass)** with two high-capability subagents (`xhigh` reasoning) in parallel using the **same exact prompt/instructions** for both.
+2. In Loop A, both subagents must focus on implementation quality, regression risk, and test gaps for the current diff.
+3. Fix all blocking findings from Loop A, then rerun Loop A until both subagents report no blocking findings.
+4. After Loop A passes, run **Loop B (Architecture/Tradeoff Pass)** for architecture fit, alternative approach tradeoffs, and milestone-scope alignment.
+5. If Loop B causes material code changes, rerun Loop A and then Loop B again (full loop) until both loops are satisfactory.
+6. Document both loop outputs, decisions, tradeoffs, and final satisfaction verdict in PR comments.
 
-Process rule:
-- Do not rely on PR bot reviews as the only gate; the dual-subagent analysis loop is required.
+Process rules:
+- Do not rely on PR bot reviews as the only gate; the dual-loop subagent process is required.
+- The first review loop must always use identical prompts for both subagents to reduce prompt-induced drift.
 
 ## 10) Milestone Commit Journal
 
