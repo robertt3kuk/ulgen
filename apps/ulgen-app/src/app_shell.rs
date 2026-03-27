@@ -10,7 +10,10 @@ use ulgen_command::{
     command_ids, resolve_keymap, CommandAction, CommandRegistry, KeyBinding,
     KeymapProfile as CommandKeymapProfile, ResolvedKeymap,
 };
-use ulgen_domain::{Block, BlockOutputChunk, BlockStatus, Pane, Surface, Tab, Workspace};
+use ulgen_domain::{
+    Block, BlockOutputChunk, BlockStatus, NotificationEvent, Pane, Surface, Tab, Workspace,
+};
+use ulgen_notify::NotificationBus;
 use ulgen_settings::{AppSettings, KeymapOverride, KeymapProfile, SidebarPosition};
 
 const APP_STATE_VERSION: u32 = 2;
@@ -125,6 +128,16 @@ struct PaletteCandidate {
     query_fields: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockNavigationTarget {
+    pub block_id: String,
+    pub session_id: String,
+    pub window_id: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+}
+
 #[derive(Clone)]
 struct KeymapCache {
     profile: KeymapProfile,
@@ -169,6 +182,7 @@ pub struct AppShell {
     state: AppShellState,
     state_path: PathBuf,
     commands: CommandRegistry,
+    notification_bus: NotificationBus,
     keymap_cache: Option<KeymapCache>,
     block_index: BlockIndex,
     sidebar_selection_id: Option<String>,
@@ -181,6 +195,7 @@ impl AppShell {
         } else {
             Self::default_state()
         };
+        let notifications_policy = state.settings.notifications_policy;
         let block_index = BlockIndex::from_blocks(&state.blocks)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
@@ -188,6 +203,7 @@ impl AppShell {
             state,
             state_path,
             commands: CommandRegistry::new(),
+            notification_bus: NotificationBus::new(notifications_policy),
             keymap_cache: None,
             block_index,
             sidebar_selection_id: None,
@@ -393,6 +409,74 @@ impl AppShell {
         Err(format!("unknown palette item id: {palette_item_id}"))
     }
 
+    pub fn notification_history(&self) -> Vec<NotificationEvent> {
+        self.notification_bus.history()
+    }
+
+    pub fn mark_block_approval_required(
+        &self,
+        block_id: &str,
+        reason: impl Into<String>,
+    ) -> Result<(), String> {
+        let block = self
+            .block_by_id(block_id)
+            .ok_or_else(|| format!("block missing: {block_id}"))?;
+        let summary = notification_input_summary(&block.input);
+        self.notification_bus.publish_approval_required(
+            format!("Approval required for {summary}"),
+            reason.into(),
+            Some(block.id.clone()),
+        );
+        Ok(())
+    }
+
+    pub fn resolve_block_navigation_target(
+        &self,
+        block_id: &str,
+    ) -> Result<BlockNavigationTarget, String> {
+        let block = self
+            .block_by_id(block_id)
+            .ok_or_else(|| format!("block missing: {block_id}"))?;
+
+        for window in &self.state.windows {
+            for workspace in &window.workspaces {
+                for tab in &workspace.tabs {
+                    for pane in &tab.panes {
+                        if pane
+                            .surfaces
+                            .iter()
+                            .any(|surface| surface.session_id == block.session_id)
+                        {
+                            return Ok(BlockNavigationTarget {
+                                block_id: block.id.clone(),
+                                session_id: block.session_id.clone(),
+                                window_id: window.id.clone(),
+                                workspace_id: workspace.id.clone(),
+                                tab_id: tab.id.clone(),
+                                pane_id: pane.id.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(format!(
+            "navigation target missing for block session: {}",
+            block.session_id
+        ))
+    }
+
+    pub fn resolve_notification_target(
+        &self,
+        event: &NotificationEvent,
+    ) -> Result<Option<BlockNavigationTarget>, String> {
+        let Some(block_id) = event.block_id.as_deref() else {
+            return Ok(None);
+        };
+        self.resolve_block_navigation_target(block_id).map(Some)
+    }
+
     pub fn blocks(&self) -> &[Block] {
         &self.state.blocks
     }
@@ -494,16 +578,20 @@ impl AppShell {
             return Err("finish_block requires a terminal status".to_string());
         }
 
-        let block = self.block_by_id_mut(block_id)?;
-        if block.status != BlockStatus::Running {
-            return Err(format!(
-                "block already finalized with status {:?}",
-                block.status
-            ));
-        }
+        let (block_input, final_status) = {
+            let block = self.block_by_id_mut(block_id)?;
+            if block.status != BlockStatus::Running {
+                return Err(format!(
+                    "block already finalized with status {:?}",
+                    block.status
+                ));
+            }
 
-        block.status = status;
-        block.finished_at_ms = Some(now_ms());
+            block.status = status;
+            block.finished_at_ms = Some(now_ms());
+            (block.input.clone(), block.status.clone())
+        };
+        self.publish_block_status_notification(block_id, &block_input, &final_status);
         Ok(())
     }
 
@@ -1208,6 +1296,39 @@ impl AppShell {
         self.state.palette_recent.truncate(PALETTE_RECENT_LIMIT);
     }
 
+    fn publish_block_status_notification(
+        &self,
+        block_id: &str,
+        block_input: &str,
+        status: &BlockStatus,
+    ) {
+        let summary = notification_input_summary(block_input);
+        match status {
+            BlockStatus::Succeeded => {
+                self.notification_bus.publish_task_done(
+                    "Block completed",
+                    format!("Completed: {summary}"),
+                    Some(block_id.to_string()),
+                );
+            }
+            BlockStatus::Failed => {
+                self.notification_bus.publish_task_failed(
+                    "Block failed",
+                    format!("Failed: {summary}"),
+                    Some(block_id.to_string()),
+                );
+            }
+            BlockStatus::Cancelled => {
+                self.notification_bus.publish_task_failed(
+                    "Block cancelled",
+                    format!("Cancelled: {summary}"),
+                    Some(block_id.to_string()),
+                );
+            }
+            BlockStatus::Running => {}
+        }
+    }
+
     fn session_exists(&self, session_id: &str) -> bool {
         self.state.windows.iter().any(|window| {
             window.workspaces.iter().any(|workspace| {
@@ -1340,6 +1461,21 @@ fn palette_match_score(query_fields: &[String], query: &str) -> Option<i32> {
     best
 }
 
+fn notification_input_summary(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return "(empty command)".to_string();
+    }
+
+    const LIMIT: usize = 80;
+    let chars = trimmed.chars().collect::<Vec<_>>();
+    if chars.len() <= LIMIT {
+        return trimmed.to_string();
+    }
+
+    chars.into_iter().take(LIMIT).collect::<String>() + "..."
+}
+
 fn previous_index(current: usize, len: usize) -> usize {
     if len == 0 {
         return 0;
@@ -1396,7 +1532,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use ulgen_command::command_ids;
-    use ulgen_domain::{BlockStatus, Pane, Surface, Tab};
+    use ulgen_domain::{BlockStatus, NotificationEvent, NotificationEventKind, Pane, Surface, Tab};
     use ulgen_settings::{KeymapOverride, KeymapProfile, SidebarPosition};
 
     static TEST_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2399,6 +2535,153 @@ mod tests {
         if path.exists() {
             fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn finishing_blocks_emits_completion_and_failure_notifications() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let succeeded_block_id = shell
+            .start_command_block_for_active_session("cargo test")
+            .unwrap();
+        shell
+            .finish_block(&succeeded_block_id, BlockStatus::Succeeded)
+            .unwrap();
+
+        let failed_block_id = shell
+            .start_command_block_for_active_session("cargo test --bad-flag")
+            .unwrap();
+        shell
+            .finish_block(&failed_block_id, BlockStatus::Failed)
+            .unwrap();
+
+        let history = shell.notification_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].kind, NotificationEventKind::TaskDone);
+        assert_eq!(history[0].block_id.as_deref(), Some(succeeded_block_id.as_str()));
+        assert_eq!(history[1].kind, NotificationEventKind::TaskFailed);
+        assert_eq!(history[1].block_id.as_deref(), Some(failed_block_id.as_str()));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn approval_notifications_and_deep_link_resolution_work_for_blocks() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let block_id = shell
+            .start_command_block_for_active_session("rm -rf ./tmp")
+            .unwrap();
+
+        shell
+            .mark_block_approval_required(&block_id, "User confirmation required")
+            .unwrap();
+
+        let event = shell.notification_history().last().cloned().unwrap();
+        assert_eq!(event.kind, NotificationEventKind::ApprovalRequired);
+        assert_eq!(event.block_id.as_deref(), Some(block_id.as_str()));
+
+        let target = shell
+            .resolve_notification_target(&event)
+            .unwrap()
+            .expect("approval event should deep-link to block target");
+        assert_eq!(target.block_id, block_id);
+
+        let no_block_event = NotificationEvent {
+            id: 999,
+            kind: NotificationEventKind::TaskDone,
+            title: "no block".to_string(),
+            message: "event without block".to_string(),
+            block_id: None,
+        };
+        assert!(shell
+            .resolve_notification_target(&no_block_event)
+            .unwrap()
+            .is_none());
+
+        let stale_block_event = NotificationEvent {
+            id: 1000,
+            kind: NotificationEventKind::TaskDone,
+            title: "stale block".to_string(),
+            message: "event with stale block id".to_string(),
+            block_id: Some("block-missing".to_string()),
+        };
+        let stale_error = shell
+            .resolve_notification_target(&stale_block_event)
+            .unwrap_err();
+        assert!(stale_error.contains("block missing: block-missing"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn cancelled_blocks_emit_failed_notifications() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let block_id = shell
+            .start_command_block_for_active_session("sleep 120")
+            .unwrap();
+        shell
+            .finish_block(&block_id, BlockStatus::Cancelled)
+            .unwrap();
+
+        let event = shell.notification_history().last().cloned().unwrap();
+        assert_eq!(event.kind, NotificationEventKind::TaskFailed);
+        assert_eq!(event.block_id.as_deref(), Some(block_id.as_str()));
+        assert!(event.title.to_ascii_lowercase().contains("cancelled"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolve_block_navigation_target_errors_when_session_is_missing() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let block_id = shell
+            .start_command_block_for_active_session("echo orphan")
+            .unwrap();
+        shell.state.windows[0].workspaces[0].tabs[0].panes[0].surfaces[0].session_id =
+            "session-replaced".to_string();
+
+        let error = shell.resolve_block_navigation_target(&block_id).unwrap_err();
+        assert!(error.contains("navigation target missing for block session"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn notification_input_summary_handles_empty_and_truncation() {
+        assert_eq!(notification_input_summary("   "), "(empty command)");
+        assert_eq!(notification_input_summary("cargo test"), "cargo test");
+
+        let long = "x".repeat(120);
+        let summarized = notification_input_summary(&long);
+        assert!(summarized.ends_with("..."));
+        assert!(summarized.len() < long.len());
     }
 
     #[test]
