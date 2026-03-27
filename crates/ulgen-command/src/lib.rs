@@ -13,6 +13,9 @@ pub mod command_ids {
     pub const PANE_PREV: &str = "pane.prev";
     pub const PANE_SPLIT_RIGHT: &str = "pane.split.right";
     pub const PANE_SPLIT_DOWN: &str = "pane.split.down";
+    pub const SIDEBAR_TOGGLE_POSITION: &str = "sidebar.position.toggle";
+    pub const SIDEBAR_NEXT: &str = "sidebar.next";
+    pub const SIDEBAR_PREV: &str = "sidebar.prev";
 }
 
 pub fn baseline_command_ids() -> &'static [&'static str] {
@@ -29,6 +32,9 @@ pub fn baseline_command_ids() -> &'static [&'static str] {
         command_ids::PANE_PREV,
         command_ids::PANE_SPLIT_RIGHT,
         command_ids::PANE_SPLIT_DOWN,
+        command_ids::SIDEBAR_TOGGLE_POSITION,
+        command_ids::SIDEBAR_NEXT,
+        command_ids::SIDEBAR_PREV,
     ]
 }
 
@@ -170,6 +176,18 @@ pub fn default_keybindings(profile: KeymapProfile) -> Vec<KeyBinding> {
                 chord: "ctrl+shift+v".to_string(),
                 command_id: PANE_SPLIT_DOWN.to_string(),
             },
+            KeyBinding {
+                chord: "ctrl+alt+s".to_string(),
+                command_id: SIDEBAR_TOGGLE_POSITION.to_string(),
+            },
+            KeyBinding {
+                chord: "ctrl+alt+j".to_string(),
+                command_id: SIDEBAR_NEXT.to_string(),
+            },
+            KeyBinding {
+                chord: "ctrl+alt+k".to_string(),
+                command_id: SIDEBAR_PREV.to_string(),
+            },
         ],
         KeymapProfile::Tmux => vec![
             KeyBinding {
@@ -219,6 +237,18 @@ pub fn default_keybindings(profile: KeymapProfile) -> Vec<KeyBinding> {
             KeyBinding {
                 chord: "ctrl+b \"".to_string(),
                 command_id: PANE_SPLIT_DOWN.to_string(),
+            },
+            KeyBinding {
+                chord: "ctrl+b s".to_string(),
+                command_id: SIDEBAR_TOGGLE_POSITION.to_string(),
+            },
+            KeyBinding {
+                chord: "ctrl+b ]".to_string(),
+                command_id: SIDEBAR_NEXT.to_string(),
+            },
+            KeyBinding {
+                chord: "ctrl+b [".to_string(),
+                command_id: SIDEBAR_PREV.to_string(),
             },
         ],
     }
@@ -388,6 +418,41 @@ mod tests {
         assert_eq!(
             resolved.command_for_chord("ctrl+shift+tab"),
             Some(command_ids::TAB_PREV)
+        );
+        assert_eq!(
+            resolved.command_for_chord("ctrl+alt+s"),
+            Some(command_ids::SIDEBAR_TOGGLE_POSITION)
+        );
+        assert_eq!(
+            resolved.command_for_chord("ctrl+alt+j"),
+            Some(command_ids::SIDEBAR_NEXT)
+        );
+        assert_eq!(
+            resolved.command_for_chord("ctrl+alt+k"),
+            Some(command_ids::SIDEBAR_PREV)
+        );
+    }
+
+    #[test]
+    fn resolve_tmux_keymap_includes_sidebar_bindings() {
+        let resolved = resolve_keymap(KeymapProfile::Tmux, &[]);
+
+        assert_eq!(resolved.rejected_overrides().len(), 0);
+        assert_eq!(
+            resolved.command_for_chord("ctrl+b c"),
+            Some(command_ids::WINDOW_NEW)
+        );
+        assert_eq!(
+            resolved.command_for_chord("ctrl+b s"),
+            Some(command_ids::SIDEBAR_TOGGLE_POSITION)
+        );
+        assert_eq!(
+            resolved.command_for_chord("ctrl+b ]"),
+            Some(command_ids::SIDEBAR_NEXT)
+        );
+        assert_eq!(
+            resolved.command_for_chord("ctrl+b ["),
+            Some(command_ids::SIDEBAR_PREV)
         );
     }
 

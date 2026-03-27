@@ -11,7 +11,7 @@ use ulgen_command::{
     KeymapProfile as CommandKeymapProfile, ResolvedKeymap,
 };
 use ulgen_domain::{Block, BlockOutputChunk, BlockStatus, Pane, Surface, Tab, Workspace};
-use ulgen_settings::{AppSettings, KeymapOverride, KeymapProfile};
+use ulgen_settings::{AppSettings, KeymapOverride, KeymapProfile, SidebarPosition};
 
 const APP_STATE_VERSION: u32 = 2;
 const LEGACY_APP_STATE_VERSION: u32 = 1;
@@ -51,6 +51,53 @@ pub enum AppShellCommand {
     SelectPreviousPane,
     SplitPaneRight,
     SplitPaneDown,
+    ToggleSidebarPosition,
+    SelectNextSidebarTarget,
+    SelectPreviousSidebarTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarNodeKind {
+    Workspace,
+    Tab,
+    Pane,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarNode {
+    pub id: String,
+    pub kind: SidebarNodeKind,
+    pub title: String,
+    pub depth: u8,
+    pub is_active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarTree {
+    pub position: SidebarPosition,
+    pub nodes: Vec<SidebarNode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarTarget {
+    Workspace {
+        workspace_idx: usize,
+    },
+    Tab {
+        workspace_idx: usize,
+        tab_idx: usize,
+    },
+    Pane {
+        workspace_idx: usize,
+        tab_idx: usize,
+        pane_idx: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SidebarEntry {
+    node: SidebarNode,
+    target: SidebarTarget,
 }
 
 #[derive(Clone)]
@@ -99,6 +146,7 @@ pub struct AppShell {
     commands: CommandRegistry,
     keymap_cache: Option<KeymapCache>,
     block_index: BlockIndex,
+    sidebar_selection_id: Option<String>,
 }
 
 impl AppShell {
@@ -117,6 +165,7 @@ impl AppShell {
             commands: CommandRegistry::new(),
             keymap_cache: None,
             block_index,
+            sidebar_selection_id: None,
         };
         shell.register_builtin_commands();
         shell.state.last_started_at_ms = now_ms();
@@ -134,6 +183,107 @@ impl AppShell {
 
     pub fn command_registry(&self) -> &CommandRegistry {
         &self.commands
+    }
+
+    pub fn sidebar_position(&self) -> SidebarPosition {
+        self.state.settings.sidebar_position
+    }
+
+    pub fn sidebar_tree(&self) -> Result<SidebarTree, String> {
+        let entries = self.sidebar_entries()?;
+        Ok(SidebarTree {
+            position: self.sidebar_position(),
+            nodes: entries.into_iter().map(|entry| entry.node).collect(),
+        })
+    }
+
+    pub fn toggle_sidebar_position(&mut self) {
+        self.state.settings.sidebar_position = match self.state.settings.sidebar_position {
+            SidebarPosition::Left => SidebarPosition::Right,
+            SidebarPosition::Right => SidebarPosition::Left,
+        };
+    }
+
+    pub fn select_next_sidebar_target(&mut self) -> Result<(), String> {
+        let entries = self.sidebar_entries()?;
+        let current_idx = entries
+            .iter()
+            .position(|entry| self.sidebar_selection_id.as_deref() == Some(entry.node.id.as_str()))
+            .or_else(|| {
+                let current_target = self.current_sidebar_target().ok()?;
+                entries
+                    .iter()
+                    .position(|entry| entry.target == current_target)
+            })
+            .unwrap_or(0);
+        let next_idx = (current_idx + 1) % entries.len();
+        let next_entry = &entries[next_idx];
+        self.activate_sidebar_target(next_entry.target)?;
+        self.sidebar_selection_id = Some(next_entry.node.id.clone());
+        Ok(())
+    }
+
+    pub fn select_previous_sidebar_target(&mut self) -> Result<(), String> {
+        let entries = self.sidebar_entries()?;
+        let current_idx = entries
+            .iter()
+            .position(|entry| self.sidebar_selection_id.as_deref() == Some(entry.node.id.as_str()))
+            .or_else(|| {
+                let current_target = self.current_sidebar_target().ok()?;
+                entries
+                    .iter()
+                    .position(|entry| entry.target == current_target)
+            })
+            .unwrap_or(0);
+        let prev_idx = previous_index(current_idx, entries.len());
+        let prev_entry = &entries[prev_idx];
+        self.activate_sidebar_target(prev_entry.target)?;
+        self.sidebar_selection_id = Some(prev_entry.node.id.clone());
+        Ok(())
+    }
+
+    pub fn select_sidebar_node_by_id(&mut self, node_id: &str) -> Result<(), String> {
+        let entries = self.sidebar_entries()?;
+        let target = entries
+            .iter()
+            .find(|entry| entry.node.id == node_id)
+            .map(|entry| entry.target)
+            .ok_or_else(|| format!("sidebar node missing: {node_id}"))?;
+        self.activate_sidebar_target(target)?;
+        self.sidebar_selection_id = Some(node_id.to_string());
+        Ok(())
+    }
+
+    pub fn sidebar_fuzzy_matches(&self, query: &str) -> Result<Vec<SidebarNode>, String> {
+        let normalized = query.trim().to_ascii_lowercase();
+        let entries = self.sidebar_entries()?;
+        if normalized.is_empty() {
+            return Ok(entries.into_iter().map(|entry| entry.node).collect());
+        }
+
+        Ok(entries
+            .into_iter()
+            .filter(|entry| {
+                entry.node.title.to_ascii_lowercase().contains(&normalized)
+                    || entry.node.id.to_ascii_lowercase().contains(&normalized)
+            })
+            .map(|entry| entry.node)
+            .collect())
+    }
+
+    pub fn sidebar_fuzzy_jump(&mut self, query: &str) -> Result<Option<SidebarNode>, String> {
+        let normalized = query.trim().to_ascii_lowercase();
+        let entries = self.sidebar_entries()?;
+        let Some(entry) = entries.into_iter().find(|entry| {
+            normalized.is_empty()
+                || entry.node.title.to_ascii_lowercase().contains(&normalized)
+                || entry.node.id.to_ascii_lowercase().contains(&normalized)
+        }) else {
+            return Ok(None);
+        };
+        self.activate_sidebar_target(entry.target)?;
+        self.sidebar_selection_id = Some(entry.node.id.clone());
+        Ok(Some(entry.node))
     }
 
     pub fn blocks(&self) -> &[Block] {
@@ -338,11 +488,30 @@ impl AppShell {
             command_ids::PANE_PREV => self.route_command(AppShellCommand::SelectPreviousPane),
             command_ids::PANE_SPLIT_RIGHT => self.route_command(AppShellCommand::SplitPaneRight),
             command_ids::PANE_SPLIT_DOWN => self.route_command(AppShellCommand::SplitPaneDown),
+            command_ids::SIDEBAR_TOGGLE_POSITION => {
+                self.route_command(AppShellCommand::ToggleSidebarPosition)
+            }
+            command_ids::SIDEBAR_NEXT => {
+                self.route_command(AppShellCommand::SelectNextSidebarTarget)
+            }
+            command_ids::SIDEBAR_PREV => {
+                self.route_command(AppShellCommand::SelectPreviousSidebarTarget)
+            }
             _ => Err(format!("unknown command id: {command_id}")),
         }
     }
 
     pub fn route_command(&mut self, command: AppShellCommand) -> Result<(), String> {
+        let keep_sidebar_selection = matches!(
+            command,
+            AppShellCommand::ToggleSidebarPosition
+                | AppShellCommand::SelectNextSidebarTarget
+                | AppShellCommand::SelectPreviousSidebarTarget
+        );
+        if !keep_sidebar_selection {
+            self.sidebar_selection_id = None;
+        }
+
         match command {
             AppShellCommand::NewWindow => {
                 let window_id = self.next_id("window");
@@ -437,6 +606,12 @@ impl AppShell {
                 tab.active_pane = tab.panes.len() - 1;
                 Ok(())
             }
+            AppShellCommand::ToggleSidebarPosition => {
+                self.toggle_sidebar_position();
+                Ok(())
+            }
+            AppShellCommand::SelectNextSidebarTarget => self.select_next_sidebar_target(),
+            AppShellCommand::SelectPreviousSidebarTarget => self.select_previous_sidebar_target(),
         }
     }
 
@@ -526,6 +701,21 @@ impl AppShell {
             title: "Split Pane Down".to_string(),
             description: "Split active pane and focus the new lower pane".to_string(),
         });
+        self.commands.register(CommandAction {
+            id: command_ids::SIDEBAR_TOGGLE_POSITION.to_string(),
+            title: "Toggle Sidebar Position".to_string(),
+            description: "Toggle sidebar position between left and right".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::SIDEBAR_NEXT.to_string(),
+            title: "Next Sidebar Target".to_string(),
+            description: "Select next workspace/tab/pane target in sidebar order".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::SIDEBAR_PREV.to_string(),
+            title: "Previous Sidebar Target".to_string(),
+            description: "Select previous workspace/tab/pane target in sidebar order".to_string(),
+        });
     }
 
     fn default_state() -> AppShellState {
@@ -584,6 +774,169 @@ impl AppShell {
                 format!("unsupported app shell state version: {other}"),
             )),
         }
+    }
+
+    fn sidebar_entries(&self) -> Result<Vec<SidebarEntry>, String> {
+        let window = self.active_window()?;
+        let mut entries = Vec::new();
+
+        for (workspace_idx, workspace) in window.workspaces.iter().enumerate() {
+            let workspace_active = workspace_idx == window.active_workspace;
+            entries.push(SidebarEntry {
+                node: SidebarNode {
+                    id: workspace.id.clone(),
+                    kind: SidebarNodeKind::Workspace,
+                    title: workspace.name.clone(),
+                    depth: 0,
+                    is_active: workspace_active,
+                },
+                target: SidebarTarget::Workspace { workspace_idx },
+            });
+
+            for (tab_idx, tab) in workspace.tabs.iter().enumerate() {
+                let tab_active = workspace_active && tab_idx == workspace.active_tab;
+                entries.push(SidebarEntry {
+                    node: SidebarNode {
+                        id: tab.id.clone(),
+                        kind: SidebarNodeKind::Tab,
+                        title: tab.title.clone(),
+                        depth: 1,
+                        is_active: tab_active,
+                    },
+                    target: SidebarTarget::Tab {
+                        workspace_idx,
+                        tab_idx,
+                    },
+                });
+
+                for (pane_idx, pane) in tab.panes.iter().enumerate() {
+                    let pane_active = tab_active && pane_idx == tab.active_pane;
+                    entries.push(SidebarEntry {
+                        node: SidebarNode {
+                            id: pane.id.clone(),
+                            kind: SidebarNodeKind::Pane,
+                            title: format!("Pane {}", pane_idx + 1),
+                            depth: 2,
+                            is_active: pane_active,
+                        },
+                        target: SidebarTarget::Pane {
+                            workspace_idx,
+                            tab_idx,
+                            pane_idx,
+                        },
+                    });
+                }
+            }
+        }
+
+        if entries.is_empty() {
+            return Err("active window has no sidebar entries".to_string());
+        }
+        Ok(entries)
+    }
+
+    fn current_sidebar_target(&self) -> Result<SidebarTarget, String> {
+        let window = self.active_window()?;
+        let workspace = window
+            .workspaces
+            .get(window.active_workspace)
+            .ok_or_else(|| "active workspace missing".to_string())?;
+
+        if workspace.tabs.is_empty() {
+            return Ok(SidebarTarget::Workspace {
+                workspace_idx: window.active_workspace,
+            });
+        }
+        let tab_idx = workspace.active_tab.min(workspace.tabs.len() - 1);
+        let tab = workspace
+            .tabs
+            .get(tab_idx)
+            .ok_or_else(|| "active tab missing".to_string())?;
+
+        if tab.panes.is_empty() {
+            return Ok(SidebarTarget::Tab {
+                workspace_idx: window.active_workspace,
+                tab_idx,
+            });
+        }
+        let pane_idx = tab.active_pane.min(tab.panes.len() - 1);
+        Ok(SidebarTarget::Pane {
+            workspace_idx: window.active_workspace,
+            tab_idx,
+            pane_idx,
+        })
+    }
+
+    fn activate_sidebar_target(&mut self, target: SidebarTarget) -> Result<(), String> {
+        let window = self.active_window_mut()?;
+        match target {
+            SidebarTarget::Workspace { workspace_idx } => {
+                if workspace_idx >= window.workspaces.len() {
+                    return Err(format!("workspace index out of bounds: {workspace_idx}"));
+                }
+                window.active_workspace = workspace_idx;
+                let workspace = &mut window.workspaces[workspace_idx];
+                if workspace.tabs.is_empty() {
+                    workspace.active_tab = 0;
+                    return Ok(());
+                }
+                if workspace.active_tab >= workspace.tabs.len() {
+                    workspace.active_tab = 0;
+                }
+                let tab = &mut workspace.tabs[workspace.active_tab];
+                if tab.panes.is_empty() || tab.active_pane >= tab.panes.len() {
+                    tab.active_pane = 0;
+                }
+                Ok(())
+            }
+            SidebarTarget::Tab {
+                workspace_idx,
+                tab_idx,
+            } => {
+                if workspace_idx >= window.workspaces.len() {
+                    return Err(format!("workspace index out of bounds: {workspace_idx}"));
+                }
+                window.active_workspace = workspace_idx;
+                let workspace = &mut window.workspaces[workspace_idx];
+                if tab_idx >= workspace.tabs.len() {
+                    return Err(format!("tab index out of bounds: {tab_idx}"));
+                }
+                workspace.active_tab = tab_idx;
+                let tab = &mut workspace.tabs[tab_idx];
+                if tab.panes.is_empty() || tab.active_pane >= tab.panes.len() {
+                    tab.active_pane = 0;
+                }
+                Ok(())
+            }
+            SidebarTarget::Pane {
+                workspace_idx,
+                tab_idx,
+                pane_idx,
+            } => {
+                if workspace_idx >= window.workspaces.len() {
+                    return Err(format!("workspace index out of bounds: {workspace_idx}"));
+                }
+                window.active_workspace = workspace_idx;
+                let workspace = &mut window.workspaces[workspace_idx];
+                if tab_idx >= workspace.tabs.len() {
+                    return Err(format!("tab index out of bounds: {tab_idx}"));
+                }
+                workspace.active_tab = tab_idx;
+                let tab = &mut workspace.tabs[tab_idx];
+                if pane_idx >= tab.panes.len() {
+                    return Err(format!("pane index out of bounds: {pane_idx}"));
+                }
+                tab.active_pane = pane_idx;
+                Ok(())
+            }
+        }
+    }
+
+    fn active_window(&self) -> Result<&WindowState, String> {
+        self.state
+            .windows
+            .get(self.state.active_window)
+            .ok_or_else(|| "active window missing".to_string())
     }
 
     fn active_window_mut(&mut self) -> Result<&mut WindowState, String> {
@@ -794,7 +1147,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use ulgen_command::command_ids;
     use ulgen_domain::{BlockStatus, Pane, Surface, Tab};
-    use ulgen_settings::{KeymapOverride, KeymapProfile};
+    use ulgen_settings::{KeymapOverride, KeymapProfile, SidebarPosition};
 
     static TEST_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1053,6 +1406,249 @@ mod tests {
         shell.route_command_id(command_ids::PANE_PREV).unwrap();
         assert_eq!(
             shell.state.windows[shell.state.active_window].workspaces[1].tabs[0].active_pane,
+            0
+        );
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn sidebar_tree_exposes_hierarchy_and_position_toggle() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "ops".to_string(),
+            })
+            .unwrap();
+        shell.route_command(AppShellCommand::CreateTab).unwrap();
+        shell
+            .route_command(AppShellCommand::SplitPaneRight)
+            .unwrap();
+
+        let tree = shell.sidebar_tree().unwrap();
+        assert_eq!(tree.position, SidebarPosition::Left);
+        assert!(tree.nodes.iter().any(|node| node.depth == 0));
+        assert!(tree.nodes.iter().any(|node| node.depth == 1));
+        assert!(tree.nodes.iter().any(|node| node.depth == 2));
+        assert!(tree.nodes.iter().any(|node| node.is_active));
+
+        shell
+            .route_command_id(command_ids::SIDEBAR_TOGGLE_POSITION)
+            .unwrap();
+        assert_eq!(shell.sidebar_position(), SidebarPosition::Right);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn sidebar_position_persists_across_save_and_restore() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(shell.sidebar_position(), SidebarPosition::Left);
+        shell
+            .route_command_id(command_ids::SIDEBAR_TOGGLE_POSITION)
+            .unwrap();
+        assert_eq!(shell.sidebar_position(), SidebarPosition::Right);
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(restored.sidebar_position(), SidebarPosition::Right);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn sidebar_next_previous_traversal_wraps_and_updates_active_context() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "ops".to_string(),
+            })
+            .unwrap();
+        shell.route_command(AppShellCommand::CreateTab).unwrap();
+        shell
+            .route_command(AppShellCommand::SplitPaneRight)
+            .unwrap();
+
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].active_tab,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].tabs[1].active_pane,
+            1
+        );
+
+        shell.route_command_id(command_ids::SIDEBAR_NEXT).unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            0
+        );
+
+        shell.route_command_id(command_ids::SIDEBAR_PREV).unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].active_tab,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].tabs[1].active_pane,
+            1
+        );
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn sidebar_select_by_id_and_fuzzy_jump_activate_targets() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "api".to_string(),
+            })
+            .unwrap();
+
+        let tree = shell.sidebar_tree().unwrap();
+        let api_workspace_id = tree
+            .nodes
+            .iter()
+            .find(|node| node.kind == SidebarNodeKind::Workspace && node.title == "api")
+            .unwrap()
+            .id
+            .clone();
+
+        shell.select_sidebar_node_by_id(&api_workspace_id).unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            1
+        );
+
+        let fuzzy_results = shell.sidebar_fuzzy_matches("pane").unwrap();
+        assert!(!fuzzy_results.is_empty());
+        assert!(fuzzy_results
+            .iter()
+            .all(|node| node.kind == SidebarNodeKind::Pane));
+
+        let jumped = shell.sidebar_fuzzy_jump("default").unwrap();
+        assert!(jumped.is_some());
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            0
+        );
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn sidebar_select_by_id_reports_missing_node() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let error = shell.select_sidebar_node_by_id("missing-workspace");
+        assert!(error.is_err());
+        assert!(error
+            .unwrap_err()
+            .contains("sidebar node missing: missing-workspace"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn non_sidebar_navigation_clears_sidebar_selection_cache() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "ops".to_string(),
+            })
+            .unwrap();
+        shell.route_command(AppShellCommand::CreateTab).unwrap();
+        shell
+            .route_command(AppShellCommand::SplitPaneRight)
+            .unwrap();
+
+        let workspace0_id = shell
+            .sidebar_tree()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|node| node.kind == SidebarNodeKind::Workspace && node.title == "Default")
+            .unwrap()
+            .id
+            .clone();
+        shell.select_sidebar_node_by_id(&workspace0_id).unwrap();
+        shell
+            .route_command(AppShellCommand::SelectNextWorkspace)
+            .unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].active_tab,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].tabs[1].active_pane,
+            1
+        );
+
+        shell.route_command_id(command_ids::SIDEBAR_PREV).unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].active_tab,
+            1
+        );
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].workspaces[1].tabs[1].active_pane,
             0
         );
 

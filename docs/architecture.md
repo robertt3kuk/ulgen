@@ -35,6 +35,15 @@
   - rerun original input or rerun with edited input
   - replay merged output and query session-scoped history
 
+## Sidebar navigation contract (M3-2)
+
+- Sidebar exposes active-window hierarchy as `workspace -> tabs -> panes`.
+- Sidebar position is user-configurable and persisted (`Left` default, toggle to `Right`).
+- Navigation capabilities:
+  - select node by id (click-like targeting)
+  - next/previous keyboard traversal across flattened tree order
+  - fuzzy-match and jump by node title/id
+
 ## Stability contracts
 
 - `muxd` RPC methods are versioned.
