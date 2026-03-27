@@ -15,6 +15,7 @@ use ulgen_settings::{AppSettings, KeymapOverride, KeymapProfile, SidebarPosition
 
 const APP_STATE_VERSION: u32 = 2;
 const LEGACY_APP_STATE_VERSION: u32 = 1;
+const PALETTE_RECENT_LIMIT: usize = 25;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowState {
@@ -33,6 +34,8 @@ pub struct AppShellState {
     pub settings: AppSettings,
     #[serde(default)]
     pub blocks: Vec<Block>,
+    #[serde(default)]
+    pub palette_recent: Vec<String>,
     pub next_id: u64,
     pub last_started_at_ms: u64,
 }
@@ -98,6 +101,28 @@ enum SidebarTarget {
 struct SidebarEntry {
     node: SidebarNode,
     target: SidebarTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteItemKind {
+    Command,
+    Workspace,
+    Tab,
+    Pane,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteItem {
+    pub id: String,
+    pub kind: PaletteItemKind,
+    pub title: String,
+    pub subtitle: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PaletteCandidate {
+    item: PaletteItem,
+    query_fields: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -284,6 +309,88 @@ impl AppShell {
         self.activate_sidebar_target(entry.target)?;
         self.sidebar_selection_id = Some(entry.node.id.clone());
         Ok(Some(entry.node))
+    }
+
+    pub fn palette_search(&self, query: &str) -> Result<Vec<PaletteItem>, String> {
+        let normalized = query.trim().to_ascii_lowercase();
+        let candidates = self.palette_candidates()?;
+        let recency_rank = self
+            .state
+            .palette_recent
+            .iter()
+            .enumerate()
+            .map(|(idx, item_id)| (item_id.as_str(), idx))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut ranked = Vec::new();
+        for candidate in candidates {
+            let Some(base_score) = (if normalized.is_empty() {
+                Some(0)
+            } else {
+                palette_match_score(&candidate.query_fields, &normalized)
+            }) else {
+                continue;
+            };
+
+            let recency_bonus = recency_rank
+                .get(candidate.item.id.as_str())
+                .and_then(|idx| {
+                    if *idx < PALETTE_RECENT_LIMIT {
+                        Some((PALETTE_RECENT_LIMIT - *idx) as i32)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            ranked.push((candidate.item, base_score + recency_bonus));
+        }
+
+        ranked.sort_by(|(left_item, left_score), (right_item, right_score)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| {
+                    left_item
+                        .title
+                        .to_ascii_lowercase()
+                        .cmp(&right_item.title.to_ascii_lowercase())
+                })
+                .then_with(|| left_item.id.cmp(&right_item.id))
+        });
+
+        Ok(ranked.into_iter().map(|(item, _)| item).collect())
+    }
+
+    pub fn palette_recent_items(&self) -> Result<Vec<PaletteItem>, String> {
+        let candidates = self.palette_candidates()?;
+        let by_id = candidates
+            .into_iter()
+            .map(|candidate| (candidate.item.id.clone(), candidate.item))
+            .collect::<BTreeMap<_, _>>();
+
+        Ok(self
+            .state
+            .palette_recent
+            .iter()
+            .filter_map(|item_id| by_id.get(item_id))
+            .cloned()
+            .collect())
+    }
+
+    pub fn palette_execute(&mut self, palette_item_id: &str) -> Result<(), String> {
+        if let Some(command_id) = palette_item_id.strip_prefix("cmd:") {
+            self.route_command_id(command_id)?;
+            self.record_palette_recent(palette_item_id);
+            return Ok(());
+        }
+
+        if let Some(node_id) = palette_item_id.strip_prefix("node:") {
+            self.select_sidebar_node_by_id(node_id)?;
+            self.record_palette_recent(palette_item_id);
+            return Ok(());
+        }
+
+        Err(format!("unknown palette item id: {palette_item_id}"))
     }
 
     pub fn blocks(&self) -> &[Block] {
@@ -750,6 +857,7 @@ impl AppShell {
             active_window: 0,
             settings: AppSettings::default(),
             blocks: Vec::new(),
+            palette_recent: Vec::new(),
             next_id: 6,
             last_started_at_ms: now_ms(),
         }
@@ -833,6 +941,116 @@ impl AppShell {
             return Err("active window has no sidebar entries".to_string());
         }
         Ok(entries)
+    }
+
+    fn palette_candidates(&self) -> Result<Vec<PaletteCandidate>, String> {
+        let mut candidates = Vec::new();
+        for action in self.commands.search("") {
+            let mut query_fields = vec![
+                action.id.to_ascii_lowercase(),
+                action.title.to_ascii_lowercase(),
+                action.description.to_ascii_lowercase(),
+            ];
+            query_fields.push("command".to_string());
+            candidates.push(PaletteCandidate {
+                item: PaletteItem {
+                    id: format!("cmd:{}", action.id),
+                    kind: PaletteItemKind::Command,
+                    title: action.title,
+                    subtitle: action.description,
+                },
+                query_fields,
+            });
+        }
+
+        let window = self.active_window()?;
+        for entry in self.sidebar_entries()? {
+            let (kind, subtitle, mut query_fields) = match entry.target {
+                SidebarTarget::Workspace { workspace_idx } => {
+                    let workspace_name = window
+                        .workspaces
+                        .get(workspace_idx)
+                        .map(|workspace| workspace.name.clone())
+                        .unwrap_or_else(|| entry.node.title.clone());
+                    (
+                        PaletteItemKind::Workspace,
+                        "Workspace".to_string(),
+                        vec![
+                            "workspace".to_string(),
+                            workspace_name.to_ascii_lowercase(),
+                        ],
+                    )
+                }
+                SidebarTarget::Tab {
+                    workspace_idx,
+                    tab_idx,
+                } => {
+                    let workspace_name = window
+                        .workspaces
+                        .get(workspace_idx)
+                        .map(|workspace| workspace.name.clone())
+                        .unwrap_or_else(|| "workspace".to_string());
+                    let tab_title = window
+                        .workspaces
+                        .get(workspace_idx)
+                        .and_then(|workspace| workspace.tabs.get(tab_idx))
+                        .map(|tab| tab.title.clone())
+                        .unwrap_or_else(|| entry.node.title.clone());
+                    (
+                        PaletteItemKind::Tab,
+                        format!("Tab in {workspace_name}"),
+                        vec![
+                            "tab".to_string(),
+                            workspace_name.to_ascii_lowercase(),
+                            tab_title.to_ascii_lowercase(),
+                        ],
+                    )
+                }
+                SidebarTarget::Pane {
+                    workspace_idx,
+                    tab_idx,
+                    pane_idx,
+                } => {
+                    let workspace_name = window
+                        .workspaces
+                        .get(workspace_idx)
+                        .map(|workspace| workspace.name.clone())
+                        .unwrap_or_else(|| "workspace".to_string());
+                    let tab_title = window
+                        .workspaces
+                        .get(workspace_idx)
+                        .and_then(|workspace| workspace.tabs.get(tab_idx))
+                        .map(|tab| tab.title.clone())
+                        .unwrap_or_else(|| "tab".to_string());
+                    (
+                        PaletteItemKind::Pane,
+                        format!("Pane {} in {workspace_name} / {tab_title}", pane_idx + 1),
+                        vec![
+                            "pane".to_string(),
+                            workspace_name.to_ascii_lowercase(),
+                            tab_title.to_ascii_lowercase(),
+                            format!("pane {}", pane_idx + 1),
+                        ],
+                    )
+                }
+            };
+
+            query_fields.push(entry.node.id.to_ascii_lowercase());
+            query_fields.push(entry.node.title.to_ascii_lowercase());
+            query_fields.push(subtitle.to_ascii_lowercase());
+
+            candidates.push(PaletteCandidate {
+                item: PaletteItem {
+                    id: format!("node:{}", entry.node.id),
+                    kind,
+                    title: entry.node.title,
+                    subtitle,
+                },
+                query_fields,
+            });
+        }
+
+        Ok(candidates)
     }
 
     fn current_sidebar_target(&self) -> Result<SidebarTarget, String> {
@@ -980,6 +1198,16 @@ impl AppShell {
         Some(surface.session_id.clone())
     }
 
+    fn record_palette_recent(&mut self, palette_item_id: &str) {
+        self.state
+            .palette_recent
+            .retain(|existing| existing != palette_item_id);
+        self.state
+            .palette_recent
+            .insert(0, palette_item_id.to_string());
+        self.state.palette_recent.truncate(PALETTE_RECENT_LIMIT);
+    }
+
     fn session_exists(&self, session_id: &str) -> bool {
         self.state.windows.iter().any(|window| {
             window.workspaces.iter().any(|workspace| {
@@ -1088,6 +1316,28 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn palette_match_score(query_fields: &[String], query: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let mut best: Option<i32> = None;
+    for field in query_fields {
+        let score = if field == query {
+            300
+        } else if field.starts_with(query) {
+            200
+        } else if field.contains(query) {
+            100
+        } else {
+            continue;
+        };
+        best = Some(best.map_or(score, |existing| existing.max(score)));
+    }
+
+    best
 }
 
 fn previous_index(current: usize, len: usize) -> usize {
@@ -1655,6 +1905,179 @@ mod tests {
         if path.exists() {
             fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn palette_search_includes_commands_and_sidebar_entities() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "api".to_string(),
+            })
+            .unwrap();
+        shell.route_command(AppShellCommand::CreateTab).unwrap();
+
+        let command_matches = shell.palette_search("split pane").unwrap();
+        assert!(command_matches.iter().any(|item| {
+            item.id == format!("cmd:{}", command_ids::PANE_SPLIT_RIGHT)
+                && item.kind == PaletteItemKind::Command
+        }));
+
+        let entity_matches = shell.palette_search("api").unwrap();
+        assert!(entity_matches.iter().any(|item| {
+            item.kind == PaletteItemKind::Workspace
+                && item.title == "api"
+                && item.id.starts_with("node:")
+        }));
+
+        assert!(shell.palette_search("query-that-will-not-match").unwrap().is_empty());
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn palette_execute_quick_switch_updates_context_and_recent_history() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "api".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            1
+        );
+
+        let default_workspace_item_id = shell
+            .palette_search("default")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.kind == PaletteItemKind::Workspace && item.title == "Default")
+            .unwrap()
+            .id;
+
+        shell.palette_execute(&default_workspace_item_id).unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            0
+        );
+
+        shell
+            .palette_execute(&format!("cmd:{}", command_ids::WORKSPACE_NEXT))
+            .unwrap();
+        assert_eq!(
+            shell.state.windows[shell.state.active_window].active_workspace,
+            1
+        );
+
+        let workspace_query = shell.palette_search("next").unwrap();
+        assert_eq!(
+            workspace_query.first().unwrap().id,
+            format!("cmd:{}", command_ids::WORKSPACE_NEXT)
+        );
+
+        let recents = shell.palette_recent_items().unwrap();
+        assert_eq!(
+            recents.first().unwrap().id,
+            format!("cmd:{}", command_ids::WORKSPACE_NEXT)
+        );
+        assert!(recents
+            .iter()
+            .any(|item| item.id == default_workspace_item_id));
+
+        shell.save().unwrap();
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        let restored_recents = restored.palette_recent_items().unwrap();
+        assert_eq!(
+            restored_recents.first().unwrap().id,
+            format!("cmd:{}", command_ids::WORKSPACE_NEXT)
+        );
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn palette_execute_rejects_unknown_item_id() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let error = shell.palette_execute("unknown:target");
+        assert!(error.is_err());
+        assert!(error.unwrap_err().contains("unknown palette item id"));
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn palette_execute_rejects_stale_typed_ids_without_recent_history_mutation() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command(AppShellCommand::CreateWorkspace {
+                name: "api".to_string(),
+            })
+            .unwrap();
+        shell
+            .palette_execute(&format!("cmd:{}", command_ids::WORKSPACE_NEXT))
+            .unwrap();
+        let before = shell.palette_recent_items().unwrap();
+
+        let stale_command_error = shell.palette_execute("cmd:missing.command");
+        assert!(stale_command_error.is_err());
+        assert!(stale_command_error
+            .unwrap_err()
+            .contains("unknown command id: missing.command"));
+
+        let stale_node_error = shell.palette_execute("node:missing-node");
+        assert!(stale_node_error.is_err());
+        assert!(stale_node_error
+            .unwrap_err()
+            .contains("sidebar node missing: missing-node"));
+
+        let after = shell.palette_recent_items().unwrap();
+        assert_eq!(after, before);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn palette_match_score_prioritizes_exact_prefix_then_contains() {
+        let exact = vec!["workspace".to_string()];
+        assert_eq!(palette_match_score(&exact, "workspace"), Some(300));
+
+        let prefix = vec!["workspace.next".to_string()];
+        assert_eq!(palette_match_score(&prefix, "workspace"), Some(200));
+
+        let contains = vec!["next workspace".to_string()];
+        assert_eq!(palette_match_score(&contains, "workspace"), Some(100));
+
+        let no_match = vec!["pane".to_string()];
+        assert_eq!(palette_match_score(&no_match, "workspace"), None);
     }
 
     #[test]
