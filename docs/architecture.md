@@ -44,6 +44,18 @@
   - next/previous keyboard traversal across flattened tree order
   - fuzzy-match and jump by node title/id
 
+## Command palette contract (M3-3)
+
+- Palette unifies executable commands and quick-switch entities into a single searchable surface.
+- Palette item ids are stable and typed:
+  - `cmd:<command_id>` for registered command actions
+  - `node:<sidebar_node_id>` for workspace/tab/pane quick switch targets
+- Search ranking baseline:
+  - exact match > prefix match > substring match
+  - recent selections apply a deterministic recency boost
+- Executing a palette item must route through existing command/sidebar handlers and record recency history.
+- Recent palette selections are persisted in app state for restore and next-start discoverability.
+
 ## Stability contracts
 
 - `muxd` RPC methods are versioned.
