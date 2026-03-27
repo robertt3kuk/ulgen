@@ -66,6 +66,22 @@
 - App shell exposes deterministic block navigation resolution using `block_id -> session -> window/workspace/tab/pane`.
 - Notification transport policy remains driven by settings (`in-app`, `os`, or both) via `NotificationBus`.
 
+## ACP transport contract (M4-1)
+
+- ACP server lifecycle gates all session operations behind `initialize`.
+- Session lifecycle methods:
+  - `session/new` -> create deterministic session identity
+  - `session/load` -> load existing session metadata
+  - `session/prompt` -> accept prompt and produce session update
+  - `session/cancel` -> cancel session and emit cancellation update
+  - `session/updates` -> drain update stream for a session
+- JSON-RPC stdio transport accepts line-delimited request frames and returns one JSON response frame per request (notifications return no response frame).
+- JSON-RPC `id` values support `string` and `number`; parse/invalid-request failures return `id: null`.
+- Error contract:
+  - parse errors (`-32700`)
+  - invalid request/method/params (`-32600/-32601/-32602`)
+  - ACP server state errors (`-32001` not initialized, `-32002` unsupported protocol, `-32004` session missing for session-scoped operations with unknown ids)
+
 ## Stability contracts
 
 - `muxd` RPC methods are versioned.
