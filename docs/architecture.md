@@ -77,10 +77,15 @@
   - `session/updates` -> drain update stream for a session
 - Terminal lifecycle methods (M4-2):
   - `terminal/create` -> create a session-scoped terminal handle (`output_byte_limit` bounded, `outputByteLimit` alias accepted)
+  - `terminal/input` -> submit raw input bytes with source attribution (`agent`/`user`)
   - `terminal/output` -> return bounded output plus optional exit status
   - `terminal/wait_for_exit` -> return terminal exit state when available
   - `terminal/kill` -> terminate terminal process for owning session
   - `terminal/release` -> kill (best effort for already-exited/not-found) then untrack ownership handle
+- Interactive app mode (M4-3):
+  - alternate-screen transitions (`?1049`, `?1048`, `?1047`, `?47` enter/exit) are detected from terminal output stream
+  - user-sourced input can claim interactive control while in alternate screen
+  - agent operations that would disrupt user control are denied while interactive mode is user-owned
 - JSON-RPC stdio transport accepts line-delimited request frames and returns one JSON response frame per request (notifications return no response frame).
 - JSON-RPC `id` values support `string` and `number`; parse/invalid-request failures return `id: null`.
 - Error contract:
