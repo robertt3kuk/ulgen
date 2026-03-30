@@ -102,3 +102,14 @@
 - `muxd` RPC methods are versioned.
 - settings schema remains backward compatible per minor release.
 - permission policy defaults are explicit and auditable.
+
+## Theme contract (M5-1)
+
+- Theme system uses semantic token bundles that apply to both app-shell chrome and terminal surfaces.
+- Settings split user intent into:
+  - `theme_mode` (`Light`/`Dark`/`System`)
+  - `theme_preset` (`Horizon`/`Grove`/`Ember`)
+- Runtime resolution contract:
+  - `System` mode resolves against OS/system preference when available
+  - fallback mode defaults to `Dark` when system preference is unknown
+- Theme changes are applied from persisted app settings and must survive save/restore cycles.

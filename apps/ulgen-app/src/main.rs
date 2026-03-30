@@ -88,6 +88,7 @@ fn main() {
         .expect("saving app shell state should succeed");
 
     let resolved_keymap = app_shell.resolve_active_keymap();
+    let resolved_theme = app_shell.resolve_theme(None);
 
     println!("Ulgen app shell bootstrap is ready.");
     println!("{}", app_shell.startup_summary());
@@ -101,6 +102,13 @@ fn main() {
         app_shell.state().settings.keymap_profile,
         resolved_keymap.bindings().len(),
         resolved_keymap.rejected_overrides().len()
+    );
+    println!(
+        "Active theme: mode={:?}, preset={:?}, accent={}, terminal_bg={}.",
+        resolved_theme.mode,
+        resolved_theme.preset,
+        resolved_theme.tokens.accent,
+        resolved_theme.tokens.terminal_bg
     );
     println!("Tracked blocks: {}", app_shell.blocks().len());
     if let Some(block_id) = run_block_id {
@@ -127,9 +135,11 @@ fn run_smoke() {
     let settings = &restored.state().settings;
 
     println!(
-        "Smoke OK: sidebar={:?}, keymap={:?}, windows={}, active_window_workspaces={}.",
+        "Smoke OK: sidebar={:?}, keymap={:?}, theme_mode={:?}, theme_preset={:?}, windows={}, active_window_workspaces={}.",
         settings.sidebar_position,
         settings.keymap_profile,
+        settings.theme_mode,
+        settings.theme_preset,
         restored.state().windows.len(),
         restored.state().windows[restored.state().active_window]
             .workspaces

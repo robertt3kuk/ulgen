@@ -14,7 +14,10 @@ use ulgen_domain::{
     Block, BlockOutputChunk, BlockStatus, NotificationEvent, Pane, Surface, Tab, Workspace,
 };
 use ulgen_notify::NotificationBus;
-use ulgen_settings::{AppSettings, KeymapOverride, KeymapProfile, SidebarPosition};
+use ulgen_settings::{
+    export_theme_definition, import_theme_definition, resolve_theme_with_custom, AppSettings,
+    KeymapOverride, KeymapProfile, ResolvedTheme, SidebarPosition, ThemeMode, ThemePreset,
+};
 
 const APP_STATE_VERSION: u32 = 2;
 const LEGACY_APP_STATE_VERSION: u32 = 1;
@@ -228,6 +231,80 @@ impl AppShell {
 
     pub fn sidebar_position(&self) -> SidebarPosition {
         self.state.settings.sidebar_position
+    }
+
+    pub fn theme_mode(&self) -> ThemeMode {
+        self.state.settings.theme_mode
+    }
+
+    pub fn theme_preset(&self) -> ThemePreset {
+        self.state.settings.theme_preset
+    }
+
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        self.state.settings.theme_mode = mode;
+    }
+
+    pub fn set_theme_preset(&mut self, preset: ThemePreset) {
+        self.state.settings.theme_preset = preset;
+    }
+
+    pub fn resolve_theme(&self, system_mode: Option<ThemeMode>) -> ResolvedTheme {
+        resolve_theme_with_custom(
+            self.state.settings.theme_mode,
+            self.state.settings.theme_preset,
+            system_mode,
+            &self.state.settings.custom_themes,
+            self.state.settings.active_custom_theme_id.as_deref(),
+        )
+    }
+
+    pub fn import_theme_definition(&mut self, serialized: &str) -> Result<(), String> {
+        let imported = import_theme_definition(serialized)?;
+        match self
+            .state
+            .settings
+            .custom_themes
+            .iter_mut()
+            .find(|theme| theme.id == imported.id)
+        {
+            Some(existing) => *existing = imported.clone(),
+            None => self.state.settings.custom_themes.push(imported.clone()),
+        }
+        self.state.settings.active_custom_theme_id = Some(imported.id);
+        Ok(())
+    }
+
+    pub fn export_theme_definition(&self, theme_id: &str) -> Result<Option<String>, String> {
+        let Some(theme) = self
+            .state
+            .settings
+            .custom_themes
+            .iter()
+            .find(|theme| theme.id == theme_id)
+        else {
+            return Ok(None);
+        };
+        export_theme_definition(theme).map(Some)
+    }
+
+    pub fn activate_custom_theme(&mut self, theme_id: Option<&str>) -> Result<(), String> {
+        match theme_id {
+            Some(id) => {
+                let exists = self
+                    .state
+                    .settings
+                    .custom_themes
+                    .iter()
+                    .any(|theme| theme.id == id);
+                if !exists {
+                    return Err(format!("unknown custom theme id: {id}"));
+                }
+                self.state.settings.active_custom_theme_id = Some(id.to_string());
+            }
+            None => self.state.settings.active_custom_theme_id = None,
+        }
+        Ok(())
     }
 
     pub fn sidebar_tree(&self) -> Result<SidebarTree, String> {
@@ -827,11 +904,13 @@ impl AppShell {
         let active_window = self.state.windows.get(self.state.active_window);
         let workspace_count = active_window.map(|w| w.workspaces.len()).unwrap_or(0);
         format!(
-            "AppShell version={}, windows={}, active_window={}, active_window_workspaces={}",
+            "AppShell version={}, windows={}, active_window={}, active_window_workspaces={}, theme_mode={:?}, theme_preset={:?}",
             self.state.version,
             self.state.windows.len(),
             self.state.active_window,
-            workspace_count
+            workspace_count,
+            self.state.settings.theme_mode,
+            self.state.settings.theme_preset
         )
     }
 
@@ -1063,10 +1142,7 @@ impl AppShell {
                     (
                         PaletteItemKind::Workspace,
                         "Workspace".to_string(),
-                        vec![
-                            "workspace".to_string(),
-                            workspace_name.to_ascii_lowercase(),
-                        ],
+                        vec!["workspace".to_string(), workspace_name.to_ascii_lowercase()],
                     )
                 }
                 SidebarTarget::Tab {
@@ -1859,6 +1935,124 @@ mod tests {
     }
 
     #[test]
+    fn theme_resolution_updates_immediately_when_settings_change() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        let initial = shell.resolve_theme(Some(ThemeMode::Light));
+
+        shell.set_theme_mode(ThemeMode::Dark);
+        shell.set_theme_preset(ThemePreset::Ember);
+        let updated = shell.resolve_theme(Some(ThemeMode::Light));
+
+        assert_eq!(updated.mode, ThemeMode::Dark);
+        assert_eq!(updated.preset, ThemePreset::Ember);
+        assert_ne!(initial.tokens.accent, updated.tokens.accent);
+        assert_ne!(initial.tokens.terminal_bg, updated.tokens.terminal_bg);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn theme_settings_persist_across_save_and_restore() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell.set_theme_mode(ThemeMode::Light);
+        shell.set_theme_preset(ThemePreset::Grove);
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(restored.theme_mode(), ThemeMode::Light);
+        assert_eq!(restored.theme_preset(), ThemePreset::Grove);
+        let resolved = restored.resolve_theme(Some(ThemeMode::Dark));
+        assert_eq!(resolved.mode, ThemeMode::Light);
+        assert_eq!(resolved.preset, ThemePreset::Grove);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn imported_theme_pipeline_activates_exports_and_persists() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let custom_theme = r##"{
+            "id":"aurora",
+            "name":"Aurora",
+            "light":{
+                "surface_bg":"#f5f7ff",
+                "surface_fg":"#1b2240",
+                "surface_muted":"#6c7391",
+                "border":"#c7d1ff",
+                "accent":"#3f67ff",
+                "success":"#1f8a5b",
+                "warning":"#b77500",
+                "danger":"#c43a45",
+                "terminal_bg":"#f9fbff",
+                "terminal_fg":"#1b2240",
+                "terminal_cursor":"#3f67ff"
+            },
+            "dark":{
+                "surface_bg":"#0f1224",
+                "surface_fg":"#dce2ff",
+                "surface_muted":"#8a93ba",
+                "border":"#2a3463",
+                "accent":"#7e96ff",
+                "success":"#52cb92",
+                "warning":"#f2bf63",
+                "danger":"#ef7b84",
+                "terminal_bg":"#090b17",
+                "terminal_fg":"#dce2ff",
+                "terminal_cursor":"#7e96ff"
+            }
+        }"##;
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell.import_theme_definition(custom_theme).unwrap();
+        let themed = shell.resolve_theme(Some(ThemeMode::Light));
+        assert_eq!(themed.custom_theme_id, Some("aurora".to_string()));
+        assert_eq!(themed.custom_theme_name, Some("Aurora".to_string()));
+        assert_eq!(themed.tokens.accent, "#3f67ff");
+
+        let exported = shell
+            .export_theme_definition("aurora")
+            .unwrap()
+            .expect("theme should be exportable");
+        assert!(exported.contains("\"id\": \"aurora\""));
+        assert!(exported.contains("\"name\": \"Aurora\""));
+
+        shell.activate_custom_theme(None).unwrap();
+        let fallback = shell.resolve_theme(Some(ThemeMode::Light));
+        assert_eq!(fallback.custom_theme_id, None);
+
+        shell.activate_custom_theme(Some("aurora")).unwrap();
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        let resolved = restored.resolve_theme(Some(ThemeMode::Dark));
+        assert_eq!(resolved.custom_theme_id, Some("aurora".to_string()));
+        assert_eq!(resolved.custom_theme_name, Some("Aurora".to_string()));
+        assert_eq!(resolved.tokens.accent, "#7e96ff");
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn sidebar_next_previous_traversal_wraps_and_updates_active_context() {
         let path = temp_state_path();
         if path.exists() {
@@ -2071,7 +2265,10 @@ mod tests {
                 && item.id.starts_with("node:")
         }));
 
-        assert!(shell.palette_search("query-that-will-not-match").unwrap().is_empty());
+        assert!(shell
+            .palette_search("query-that-will-not-match")
+            .unwrap()
+            .is_empty());
 
         if path.exists() {
             fs::remove_file(path).unwrap();
@@ -2339,6 +2536,75 @@ mod tests {
     }
 
     #[test]
+    fn restore_state_defaults_missing_theme_fields_in_settings() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let state = r#"{
+            "version":2,
+            "windows":[
+                {
+                    "id":"window-1",
+                    "title":"Window 1",
+                    "workspaces":[
+                        {
+                            "id":"workspace-1",
+                            "name":"Default",
+                            "tabs":[
+                                {
+                                    "id":"tab-1",
+                                    "title":"main",
+                                    "panes":[
+                                        {
+                                            "id":"pane-1",
+                                            "surfaces":[
+                                                {
+                                                    "id":"surface-1",
+                                                    "session_id":"session-1",
+                                                    "cwd":"/"
+                                                }
+                                            ],
+                                            "active_surface":0
+                                        }
+                                    ],
+                                    "active_pane":0
+                                }
+                            ],
+                            "active_tab":0
+                        }
+                    ],
+                    "active_workspace":0
+                }
+            ],
+            "active_window":0,
+            "settings":{
+                "theme_mode":"System"
+            },
+            "blocks":[],
+            "palette_recent":[],
+            "next_id":1,
+            "last_started_at_ms":0
+        }"#;
+
+        fs::write(&path, state).unwrap();
+        let shell = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(shell.theme_mode(), ThemeMode::System);
+        assert_eq!(shell.theme_preset(), ThemePreset::Horizon);
+        assert!(shell.state.settings.custom_themes.is_empty());
+        assert_eq!(shell.state.settings.active_custom_theme_id, None);
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(restored.theme_preset(), ThemePreset::Horizon);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn baseline_commands_match_registry_and_route_ids() {
         let path = temp_state_path();
         if path.exists() {
@@ -2562,9 +2828,15 @@ mod tests {
         let history = shell.notification_history();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].kind, NotificationEventKind::TaskDone);
-        assert_eq!(history[0].block_id.as_deref(), Some(succeeded_block_id.as_str()));
+        assert_eq!(
+            history[0].block_id.as_deref(),
+            Some(succeeded_block_id.as_str())
+        );
         assert_eq!(history[1].kind, NotificationEventKind::TaskFailed);
-        assert_eq!(history[1].block_id.as_deref(), Some(failed_block_id.as_str()));
+        assert_eq!(
+            history[1].block_id.as_deref(),
+            Some(failed_block_id.as_str())
+        );
 
         if path.exists() {
             fs::remove_file(path).unwrap();
@@ -2665,7 +2937,9 @@ mod tests {
         shell.state.windows[0].workspaces[0].tabs[0].panes[0].surfaces[0].session_id =
             "session-replaced".to_string();
 
-        let error = shell.resolve_block_navigation_target(&block_id).unwrap_err();
+        let error = shell
+            .resolve_block_navigation_target(&block_id)
+            .unwrap_err();
         assert!(error.contains("navigation target missing for block session"));
 
         if path.exists() {
