@@ -75,12 +75,18 @@
   - `session/prompt` -> accept prompt and produce session update
   - `session/cancel` -> cancel session and emit cancellation update
   - `session/updates` -> drain update stream for a session
+- Terminal lifecycle methods (M4-2):
+  - `terminal/create` -> create a session-scoped terminal handle (`output_byte_limit` bounded, `outputByteLimit` alias accepted)
+  - `terminal/output` -> return bounded output plus optional exit status
+  - `terminal/wait_for_exit` -> return terminal exit state when available
+  - `terminal/kill` -> terminate terminal process for owning session
+  - `terminal/release` -> kill (best effort for already-exited/not-found) then untrack ownership handle
 - JSON-RPC stdio transport accepts line-delimited request frames and returns one JSON response frame per request (notifications return no response frame).
 - JSON-RPC `id` values support `string` and `number`; parse/invalid-request failures return `id: null`.
 - Error contract:
   - parse errors (`-32700`)
   - invalid request/method/params (`-32600/-32601/-32602`)
-  - ACP server state errors (`-32001` not initialized, `-32002` unsupported protocol, `-32004` session missing for session-scoped operations with unknown ids)
+  - ACP server state errors (`-32001` not initialized, `-32002` unsupported protocol, `-32004` session missing for session-scoped operations with unknown ids, `-32005` terminal operation failure including ownership/backend/runtime errors)
 
 ## Stability contracts
 
