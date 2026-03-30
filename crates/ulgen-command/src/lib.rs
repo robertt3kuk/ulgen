@@ -16,6 +16,12 @@ pub mod command_ids {
     pub const SIDEBAR_TOGGLE_POSITION: &str = "sidebar.position.toggle";
     pub const SIDEBAR_NEXT: &str = "sidebar.next";
     pub const SIDEBAR_PREV: &str = "sidebar.prev";
+    pub const CURSOR_STYLE_BAR: &str = "cursor.style.bar";
+    pub const CURSOR_STYLE_BLOCK: &str = "cursor.style.block";
+    pub const CURSOR_STYLE_UNDERLINE: &str = "cursor.style.underline";
+    pub const INPUT_POSITION_TOP: &str = "input.position.top";
+    pub const INPUT_POSITION_TOP_REVERSE: &str = "input.position.top.reverse";
+    pub const INPUT_POSITION_BOTTOM: &str = "input.position.bottom";
 }
 
 pub fn baseline_command_ids() -> &'static [&'static str] {
@@ -35,6 +41,12 @@ pub fn baseline_command_ids() -> &'static [&'static str] {
         command_ids::SIDEBAR_TOGGLE_POSITION,
         command_ids::SIDEBAR_NEXT,
         command_ids::SIDEBAR_PREV,
+        command_ids::CURSOR_STYLE_BAR,
+        command_ids::CURSOR_STYLE_BLOCK,
+        command_ids::CURSOR_STYLE_UNDERLINE,
+        command_ids::INPUT_POSITION_TOP,
+        command_ids::INPUT_POSITION_TOP_REVERSE,
+        command_ids::INPUT_POSITION_BOTTOM,
     ]
 }
 

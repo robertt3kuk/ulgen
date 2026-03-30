@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use app_shell::{default_state_path, AppShell, AppShellCommand};
 use ulgen_domain::BlockStatus;
+use ulgen_settings::{CursorStyle, InputPosition};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -75,6 +76,24 @@ fn main() {
         }
     }
 
+    match cursor_style_from_args(&args) {
+        Ok(Some(style)) => app_shell.set_cursor_style(style),
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
+    }
+
+    match input_position_from_args(&args) {
+        Ok(Some(position)) => app_shell.set_input_position(position),
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
+    }
+
     let run_block_id = match apply_run_command_args(&mut app_shell, &args) {
         Ok(block_id) => block_id,
         Err(err) => {
@@ -110,6 +129,11 @@ fn main() {
         resolved_theme.tokens.accent,
         resolved_theme.tokens.terminal_bg
     );
+    println!(
+        "Pointer/input: cursor_style={:?}, input_position={:?}.",
+        app_shell.state().settings.cursor_style,
+        app_shell.state().settings.input_position
+    );
     println!("Tracked blocks: {}", app_shell.blocks().len());
     if let Some(block_id) = run_block_id {
         println!("Recorded block: {block_id}");
@@ -135,11 +159,13 @@ fn run_smoke() {
     let settings = &restored.state().settings;
 
     println!(
-        "Smoke OK: sidebar={:?}, keymap={:?}, theme_mode={:?}, theme_preset={:?}, windows={}, active_window_workspaces={}.",
+        "Smoke OK: sidebar={:?}, keymap={:?}, theme_mode={:?}, theme_preset={:?}, cursor_style={:?}, input_position={:?}, windows={}, active_window_workspaces={}.",
         settings.sidebar_position,
         settings.keymap_profile,
         settings.theme_mode,
         settings.theme_preset,
+        settings.cursor_style,
+        settings.input_position,
         restored.state().windows.len(),
         restored.state().windows[restored.state().active_window]
             .workspaces
@@ -207,6 +233,47 @@ fn workspace_name_from_args(args: &[String]) -> Result<Option<String>, String> {
     }
 
     Ok(Some(value.clone()))
+}
+
+fn cursor_style_from_args(args: &[String]) -> Result<Option<CursorStyle>, String> {
+    let Some(value) = flag_value_from_args(args, "--cursor-style", "cursor style", false)? else {
+        return Ok(None);
+    };
+
+    let normalized = value.trim().to_ascii_lowercase();
+    let style = match normalized.as_str() {
+        "bar" => CursorStyle::Bar,
+        "block" => CursorStyle::Block,
+        "underline" => CursorStyle::Underline,
+        _ => {
+            return Err(format!(
+                "--cursor-style expects one of bar|block|underline, got '{value}'"
+            ))
+        }
+    };
+
+    Ok(Some(style))
+}
+
+fn input_position_from_args(args: &[String]) -> Result<Option<InputPosition>, String> {
+    let Some(value) = flag_value_from_args(args, "--input-position", "input position", false)?
+    else {
+        return Ok(None);
+    };
+
+    let normalized = value.trim().to_ascii_lowercase();
+    let position = match normalized.as_str() {
+        "top" | "top-classic" | "top_classic" => InputPosition::TopClassic,
+        "top-reverse" | "top_reverse" => InputPosition::TopReverse,
+        "bottom" => InputPosition::Bottom,
+        _ => {
+            return Err(format!(
+                "--input-position expects one of top|top-reverse|bottom, got '{value}'"
+            ))
+        }
+    };
+
+    Ok(Some(position))
 }
 
 fn flag_value_from_args(
@@ -319,14 +386,16 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_run_command_args, command_id_from_args, key_chord_from_args, run_command_from_args,
-        run_output_from_args, run_status_from_args, workspace_name_from_args, AppShell,
+        apply_run_command_args, command_id_from_args, cursor_style_from_args,
+        input_position_from_args, key_chord_from_args, run_command_from_args, run_output_from_args,
+        run_status_from_args, workspace_name_from_args, AppShell,
     };
     use std::fs;
     use std::path::PathBuf;
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use ulgen_domain::BlockStatus;
+    use ulgen_settings::{CursorStyle, InputPosition};
 
     static TEST_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -415,6 +484,69 @@ mod tests {
     }
 
     #[test]
+    fn parses_valid_cursor_style_value() {
+        let parsed =
+            cursor_style_from_args(&args(&["ulgen-app", "--cursor-style", "underline"])).unwrap();
+        assert_eq!(parsed, Some(CursorStyle::Underline));
+    }
+
+    #[test]
+    fn rejects_missing_cursor_style_value() {
+        let err = cursor_style_from_args(&args(&["ulgen-app", "--cursor-style"])).unwrap_err();
+        assert!(err.contains("--cursor-style requires a cursor style value"));
+    }
+
+    #[test]
+    fn rejects_option_like_cursor_style_value() {
+        let err = cursor_style_from_args(&args(&["ulgen-app", "--cursor-style", "--command"]))
+            .unwrap_err();
+        assert!(err.contains("option-like token"));
+    }
+
+    #[test]
+    fn rejects_invalid_cursor_style_value() {
+        let err =
+            cursor_style_from_args(&args(&["ulgen-app", "--cursor-style", "beam"])).unwrap_err();
+        assert!(err.contains("expects one of bar|block|underline"));
+    }
+
+    #[test]
+    fn parses_valid_input_position_value() {
+        let parsed =
+            input_position_from_args(&args(&["ulgen-app", "--input-position", "top-reverse"]))
+                .unwrap();
+        assert_eq!(parsed, Some(InputPosition::TopReverse));
+    }
+
+    #[test]
+    fn parses_top_alias_for_input_position() {
+        let parsed =
+            input_position_from_args(&args(&["ulgen-app", "--input-position", "top"])).unwrap();
+        assert_eq!(parsed, Some(InputPosition::TopClassic));
+    }
+
+    #[test]
+    fn rejects_missing_input_position_value() {
+        let err = input_position_from_args(&args(&["ulgen-app", "--input-position"])).unwrap_err();
+        assert!(err.contains("--input-position requires a input position value"));
+    }
+
+    #[test]
+    fn rejects_option_like_input_position_value() {
+        let err =
+            input_position_from_args(&args(&["ulgen-app", "--input-position", "--new-workspace"]))
+                .unwrap_err();
+        assert!(err.contains("option-like token"));
+    }
+
+    #[test]
+    fn rejects_invalid_input_position_value() {
+        let err = input_position_from_args(&args(&["ulgen-app", "--input-position", "middle"]))
+            .unwrap_err();
+        assert!(err.contains("expects one of top|top-reverse|bottom"));
+    }
+
+    #[test]
     fn parses_valid_run_command_value() {
         let parsed =
             run_command_from_args(&args(&["ulgen-app", "--run-command", "cargo test"])).unwrap();
@@ -500,6 +632,42 @@ mod tests {
         let restored_block = restored.block_by_id(&block_id).unwrap();
         assert_eq!(restored_block.input, "echo hi");
         assert_eq!(restored_block.status, BlockStatus::Succeeded);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn pointer_input_flag_flow_updates_and_persists_shell_settings() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let args = args(&[
+            "ulgen-app",
+            "--cursor-style",
+            "bar",
+            "--input-position",
+            "top-reverse",
+        ]);
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        if let Some(style) = cursor_style_from_args(&args).unwrap() {
+            shell.set_cursor_style(style);
+        }
+        if let Some(position) = input_position_from_args(&args).unwrap() {
+            shell.set_input_position(position);
+        }
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(restored.state().settings.cursor_style, CursorStyle::Bar);
+        assert_eq!(
+            restored.state().settings.input_position,
+            InputPosition::TopReverse
+        );
 
         if path.exists() {
             fs::remove_file(path).unwrap();

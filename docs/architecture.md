@@ -113,3 +113,16 @@
   - `System` mode resolves against OS/system preference when available
   - fallback mode defaults to `Dark` when system preference is unknown
 - Theme changes are applied from persisted app settings and must survive save/restore cycles.
+
+## Pointer/Input contract (M5-2)
+
+- Cursor style and input-position are first-class persisted settings:
+  - `cursor_style` (`Bar`/`Block`/`Underline`)
+  - `input_position` (`TopClassic`/`TopReverse`/`Bottom`)
+- Runtime updates must apply immediately in app shell state and be accessible through command routing.
+- Command IDs expose deterministic setting actions for palette/keymap wiring:
+  - `cursor.style.bar`, `cursor.style.block`, `cursor.style.underline`
+  - `input.position.top`, `input.position.top.reverse`, `input.position.bottom`
+- CLI parsing supports setting overrides with explicit validation:
+  - `--cursor-style bar|block|underline`
+  - `--input-position top|top-reverse|bottom`
