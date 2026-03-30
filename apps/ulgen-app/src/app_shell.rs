@@ -16,7 +16,8 @@ use ulgen_domain::{
 use ulgen_notify::NotificationBus;
 use ulgen_settings::{
     export_theme_definition, import_theme_definition, resolve_theme_with_custom, AppSettings,
-    KeymapOverride, KeymapProfile, ResolvedTheme, SidebarPosition, ThemeMode, ThemePreset,
+    CursorStyle, InputPosition, KeymapOverride, KeymapProfile, ResolvedTheme, SidebarPosition,
+    ThemeMode, ThemePreset,
 };
 
 const APP_STATE_VERSION: u32 = 2;
@@ -63,6 +64,8 @@ pub enum AppShellCommand {
     ToggleSidebarPosition,
     SelectNextSidebarTarget,
     SelectPreviousSidebarTarget,
+    SetCursorStyle { style: CursorStyle },
+    SetInputPosition { position: InputPosition },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,12 +244,28 @@ impl AppShell {
         self.state.settings.theme_preset
     }
 
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.state.settings.cursor_style
+    }
+
+    pub fn input_position(&self) -> InputPosition {
+        self.state.settings.input_position
+    }
+
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
         self.state.settings.theme_mode = mode;
     }
 
     pub fn set_theme_preset(&mut self, preset: ThemePreset) {
         self.state.settings.theme_preset = preset;
+    }
+
+    pub fn set_cursor_style(&mut self, style: CursorStyle) {
+        self.state.settings.cursor_style = style;
+    }
+
+    pub fn set_input_position(&mut self, position: InputPosition) {
+        self.state.settings.input_position = position;
     }
 
     pub fn resolve_theme(&self, system_mode: Option<ThemeMode>) -> ResolvedTheme {
@@ -769,6 +788,34 @@ impl AppShell {
             command_ids::SIDEBAR_PREV => {
                 self.route_command(AppShellCommand::SelectPreviousSidebarTarget)
             }
+            command_ids::CURSOR_STYLE_BAR => self.route_command(AppShellCommand::SetCursorStyle {
+                style: CursorStyle::Bar,
+            }),
+            command_ids::CURSOR_STYLE_BLOCK => {
+                self.route_command(AppShellCommand::SetCursorStyle {
+                    style: CursorStyle::Block,
+                })
+            }
+            command_ids::CURSOR_STYLE_UNDERLINE => {
+                self.route_command(AppShellCommand::SetCursorStyle {
+                    style: CursorStyle::Underline,
+                })
+            }
+            command_ids::INPUT_POSITION_TOP => {
+                self.route_command(AppShellCommand::SetInputPosition {
+                    position: InputPosition::TopClassic,
+                })
+            }
+            command_ids::INPUT_POSITION_TOP_REVERSE => {
+                self.route_command(AppShellCommand::SetInputPosition {
+                    position: InputPosition::TopReverse,
+                })
+            }
+            command_ids::INPUT_POSITION_BOTTOM => {
+                self.route_command(AppShellCommand::SetInputPosition {
+                    position: InputPosition::Bottom,
+                })
+            }
             _ => Err(format!("unknown command id: {command_id}")),
         }
     }
@@ -884,6 +931,14 @@ impl AppShell {
             }
             AppShellCommand::SelectNextSidebarTarget => self.select_next_sidebar_target(),
             AppShellCommand::SelectPreviousSidebarTarget => self.select_previous_sidebar_target(),
+            AppShellCommand::SetCursorStyle { style } => {
+                self.set_cursor_style(style);
+                Ok(())
+            }
+            AppShellCommand::SetInputPosition { position } => {
+                self.set_input_position(position);
+                Ok(())
+            }
         }
     }
 
@@ -904,13 +959,15 @@ impl AppShell {
         let active_window = self.state.windows.get(self.state.active_window);
         let workspace_count = active_window.map(|w| w.workspaces.len()).unwrap_or(0);
         format!(
-            "AppShell version={}, windows={}, active_window={}, active_window_workspaces={}, theme_mode={:?}, theme_preset={:?}",
+            "AppShell version={}, windows={}, active_window={}, active_window_workspaces={}, theme_mode={:?}, theme_preset={:?}, cursor_style={:?}, input_position={:?}",
             self.state.version,
             self.state.windows.len(),
             self.state.active_window,
             workspace_count,
             self.state.settings.theme_mode,
-            self.state.settings.theme_preset
+            self.state.settings.theme_preset,
+            self.state.settings.cursor_style,
+            self.state.settings.input_position
         )
     }
 
@@ -989,6 +1046,36 @@ impl AppShell {
             id: command_ids::SIDEBAR_PREV.to_string(),
             title: "Previous Sidebar Target".to_string(),
             description: "Select previous workspace/tab/pane target in sidebar order".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::CURSOR_STYLE_BAR.to_string(),
+            title: "Set Cursor Style: Bar".to_string(),
+            description: "Set terminal cursor style to bar".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::CURSOR_STYLE_BLOCK.to_string(),
+            title: "Set Cursor Style: Block".to_string(),
+            description: "Set terminal cursor style to block".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::CURSOR_STYLE_UNDERLINE.to_string(),
+            title: "Set Cursor Style: Underline".to_string(),
+            description: "Set terminal cursor style to underline".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::INPUT_POSITION_TOP.to_string(),
+            title: "Set Input Position: Top".to_string(),
+            description: "Set terminal input position to top classic".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::INPUT_POSITION_TOP_REVERSE.to_string(),
+            title: "Set Input Position: Top Reverse".to_string(),
+            description: "Set terminal input position to top reverse".to_string(),
+        });
+        self.commands.register(CommandAction {
+            id: command_ids::INPUT_POSITION_BOTTOM.to_string(),
+            title: "Set Input Position: Bottom".to_string(),
+            description: "Set terminal input position to bottom".to_string(),
         });
     }
 
@@ -1609,7 +1696,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use ulgen_command::command_ids;
     use ulgen_domain::{BlockStatus, NotificationEvent, NotificationEventKind, Pane, Surface, Tab};
-    use ulgen_settings::{KeymapOverride, KeymapProfile, SidebarPosition};
+    use ulgen_settings::{
+        CursorStyle, InputPosition, KeymapOverride, KeymapProfile, SidebarPosition,
+    };
 
     static TEST_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1976,6 +2065,65 @@ mod tests {
         let resolved = restored.resolve_theme(Some(ThemeMode::Dark));
         assert_eq!(resolved.mode, ThemeMode::Light);
         assert_eq!(resolved.preset, ThemePreset::Grove);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn pointer_and_input_settings_persist_across_save_and_restore() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell.set_cursor_style(CursorStyle::Underline);
+        shell.set_input_position(InputPosition::TopReverse);
+        shell.save().unwrap();
+
+        let restored = AppShell::bootstrap(path.clone()).unwrap();
+        assert_eq!(restored.cursor_style(), CursorStyle::Underline);
+        assert_eq!(restored.input_position(), InputPosition::TopReverse);
+
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn command_ids_support_pointer_and_input_position() {
+        let path = temp_state_path();
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+
+        let mut shell = AppShell::bootstrap(path.clone()).unwrap();
+        shell
+            .route_command_id(command_ids::CURSOR_STYLE_BAR)
+            .unwrap();
+        assert_eq!(shell.cursor_style(), CursorStyle::Bar);
+
+        shell
+            .route_command_id(command_ids::CURSOR_STYLE_UNDERLINE)
+            .unwrap();
+        assert_eq!(shell.cursor_style(), CursorStyle::Underline);
+
+        shell
+            .route_command_id(command_ids::INPUT_POSITION_TOP)
+            .unwrap();
+        assert_eq!(shell.input_position(), InputPosition::TopClassic);
+
+        shell
+            .route_command_id(command_ids::INPUT_POSITION_TOP_REVERSE)
+            .unwrap();
+        assert_eq!(shell.input_position(), InputPosition::TopReverse);
+
+        shell
+            .route_command_id(command_ids::INPUT_POSITION_BOTTOM)
+            .unwrap();
+        assert_eq!(shell.input_position(), InputPosition::Bottom);
 
         if path.exists() {
             fs::remove_file(path).unwrap();
@@ -2594,6 +2742,8 @@ mod tests {
         assert_eq!(shell.theme_preset(), ThemePreset::Horizon);
         assert!(shell.state.settings.custom_themes.is_empty());
         assert_eq!(shell.state.settings.active_custom_theme_id, None);
+        assert_eq!(shell.cursor_style(), CursorStyle::Block);
+        assert_eq!(shell.input_position(), InputPosition::Bottom);
         shell.save().unwrap();
 
         let restored = AppShell::bootstrap(path.clone()).unwrap();
