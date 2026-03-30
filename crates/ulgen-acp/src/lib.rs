@@ -213,6 +213,40 @@ impl LocalAcpTerminalBridge {
         Ok(record)
     }
 
+    fn sync_interactive_mode_from_output(
+        &mut self,
+        session_id: &str,
+        terminal_id: &TerminalId,
+        output: &str,
+    ) -> Result<(), String> {
+        let current_interactive_mode = {
+            let record = self.terminal_record(session_id, terminal_id)?;
+            record.interactive_mode
+        };
+        let next_interactive_mode = resolve_interactive_mode(current_interactive_mode, output);
+        if next_interactive_mode != current_interactive_mode {
+            let record = self.terminal_record_mut(session_id, terminal_id)?;
+            record.interactive_mode = next_interactive_mode;
+            if !next_interactive_mode {
+                record.input_owner = TerminalInputSource::Agent;
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_interactive_mode(
+        &mut self,
+        session_id: &str,
+        terminal_id: &TerminalId,
+    ) -> Result<(), String> {
+        self.terminal_record(session_id, terminal_id)?;
+        let output = self
+            .backend
+            .output(terminal_id)
+            .map_err(|error| format_terminal_error("terminal output", error))?;
+        self.sync_interactive_mode_from_output(session_id, terminal_id, &output)
+    }
+
     fn release_session_terminals(&mut self, session_id: &str) -> Result<(), String> {
         let terminal_ids = self
             .terminals
@@ -238,27 +272,17 @@ impl LocalAcpTerminalBridge {
 }
 
 fn output_has_enter_interactive_mode(output: &str) -> Option<usize> {
-    [
-        "\u{1b}[?1049h",
-        "\u{1b}[?1047h",
-        "\u{1b}[?47h",
-        "\u{1b}[?1048h",
-    ]
-    .iter()
-    .filter_map(|marker| output.rfind(marker))
-    .max()
+    ["\u{1b}[?1049h", "\u{1b}[?1047h", "\u{1b}[?47h"]
+        .iter()
+        .filter_map(|marker| output.rfind(marker))
+        .max()
 }
 
 fn output_has_exit_interactive_mode(output: &str) -> Option<usize> {
-    [
-        "\u{1b}[?1049l",
-        "\u{1b}[?1047l",
-        "\u{1b}[?47l",
-        "\u{1b}[?1048l",
-    ]
-    .iter()
-    .filter_map(|marker| output.rfind(marker))
-    .max()
+    ["\u{1b}[?1049l", "\u{1b}[?1047l", "\u{1b}[?47l"]
+        .iter()
+        .filter_map(|marker| output.rfind(marker))
+        .max()
 }
 
 fn resolve_interactive_mode(current: bool, output: &str) -> bool {
@@ -270,6 +294,17 @@ fn resolve_interactive_mode(current: bool, output: &str) -> bool {
         (Some(_), None) => true,
         (None, Some(_)) => false,
         (Some(enter), Some(exit)) => enter > exit,
+    }
+}
+
+fn resolve_input_owner_for_mode(
+    source: TerminalInputSource,
+    interactive_mode: bool,
+) -> TerminalInputSource {
+    if interactive_mode {
+        source
+    } else {
+        TerminalInputSource::Agent
     }
 }
 
@@ -304,21 +339,30 @@ impl AcpTerminalBridge for LocalAcpTerminalBridge {
 
     fn terminal_input(&mut self, request: TerminalInputRequest) -> Result<(), String> {
         let terminal_id = TerminalId(request.terminal_id.clone());
-        let record = self.terminal_record_mut(&request.session_id, &terminal_id)?;
-        if record.interactive_mode
-            && record.input_owner == TerminalInputSource::User
-            && request.source == TerminalInputSource::Agent
+        self.sync_interactive_mode(&request.session_id, &terminal_id)?;
         {
-            return Err(format!(
-                "terminal input denied: {} is under user control",
-                terminal_id.0
-            ));
+            let record = self.terminal_record(&request.session_id, &terminal_id)?;
+            if record.interactive_mode
+                && record.input_owner == TerminalInputSource::User
+                && request.source == TerminalInputSource::Agent
+            {
+                return Err(format!(
+                    "terminal input denied: {} is under user control",
+                    terminal_id.0
+                ));
+            }
         }
-        record.input_owner = request.source;
 
         self.backend
             .write(&terminal_id, &request.input)
-            .map_err(|error| format_terminal_error("terminal input", error))
+            .map_err(|error| format_terminal_error("terminal input", error))?;
+
+        let record = self.terminal_record_mut(&request.session_id, &terminal_id)?;
+        let next_interactive_mode =
+            resolve_interactive_mode(record.interactive_mode, &request.input);
+        record.interactive_mode = next_interactive_mode;
+        record.input_owner = resolve_input_owner_for_mode(request.source, next_interactive_mode);
+        Ok(())
     }
 
     fn terminal_output(
@@ -326,6 +370,13 @@ impl AcpTerminalBridge for LocalAcpTerminalBridge {
         session_id: &str,
         terminal_id: &TerminalId,
     ) -> Result<(String, Option<TerminalExitStatus>), String> {
+        self.terminal_record(session_id, terminal_id)?;
+        let output = self
+            .backend
+            .output(terminal_id)
+            .map_err(|error| format_terminal_error("terminal output", error))?;
+        self.sync_interactive_mode_from_output(session_id, terminal_id, &output)?;
+
         let (output_byte_limit, interactive_mode, input_owner) = {
             let record = self.terminal_record(session_id, terminal_id)?;
             (
@@ -335,20 +386,7 @@ impl AcpTerminalBridge for LocalAcpTerminalBridge {
             )
         };
 
-        let output = self
-            .backend
-            .output(terminal_id)
-            .map_err(|error| format_terminal_error("terminal output", error))?;
-        let next_interactive_mode = resolve_interactive_mode(interactive_mode, &output);
-        if next_interactive_mode != interactive_mode {
-            let record = self.terminal_record_mut(session_id, terminal_id)?;
-            record.interactive_mode = next_interactive_mode;
-            if !next_interactive_mode {
-                record.input_owner = TerminalInputSource::Agent;
-            }
-        }
-
-        if next_interactive_mode && input_owner == TerminalInputSource::User {
+        if interactive_mode && input_owner == TerminalInputSource::User {
             return Err(format!(
                 "terminal output denied: {} is in interactive mode under user control",
                 terminal_id.0
@@ -375,6 +413,7 @@ impl AcpTerminalBridge for LocalAcpTerminalBridge {
     }
 
     fn terminal_kill(&mut self, session_id: &str, terminal_id: &TerminalId) -> Result<(), String> {
+        self.sync_interactive_mode(session_id, terminal_id)?;
         let record = self.terminal_record(session_id, terminal_id)?;
         if record.interactive_mode && record.input_owner == TerminalInputSource::User {
             return Err(format!(
@@ -392,6 +431,7 @@ impl AcpTerminalBridge for LocalAcpTerminalBridge {
         session_id: &str,
         terminal_id: &TerminalId,
     ) -> Result<(), String> {
+        self.sync_interactive_mode(session_id, terminal_id)?;
         let record = self.terminal_record(session_id, terminal_id)?;
         if record.interactive_mode && record.input_owner == TerminalInputSource::User {
             return Err(format!(
@@ -1092,7 +1132,13 @@ fn extract_response_id(parsed: &Value) -> JsonRpcId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ulgen_pty::{create_runtime_backend, CommandSpec};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use ulgen_pty::{
+        create_runtime_backend, CommandSpec, MemoryTerminalBackend, TerminalBackend, TerminalSize,
+    };
 
     fn rpc_request(id: Value, method: &str, params: Value) -> String {
         json!({
@@ -1113,6 +1159,54 @@ mod tests {
 
     fn parse_rpc_response(line: &str) -> JsonRpcResponse {
         serde_json::from_str(line).unwrap()
+    }
+
+    struct CountingOutputBackend {
+        inner: MemoryTerminalBackend,
+        output_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingOutputBackend {
+        fn new(output_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                inner: MemoryTerminalBackend::new(),
+                output_calls,
+            }
+        }
+    }
+
+    impl TerminalBackend for CountingOutputBackend {
+        fn spawn(&mut self, spec: CommandSpec) -> Result<TerminalId, TerminalError> {
+            self.inner.spawn(spec)
+        }
+
+        fn write(&mut self, terminal_id: &TerminalId, input: &str) -> Result<(), TerminalError> {
+            self.inner.write(terminal_id, input)
+        }
+
+        fn resize(
+            &mut self,
+            terminal_id: &TerminalId,
+            size: TerminalSize,
+        ) -> Result<(), TerminalError> {
+            self.inner.resize(terminal_id, size)
+        }
+
+        fn kill(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
+            self.inner.kill(terminal_id)
+        }
+
+        fn output(&self, terminal_id: &TerminalId) -> Result<String, TerminalError> {
+            self.output_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.output(terminal_id)
+        }
+
+        fn wait_for_exit(
+            &self,
+            terminal_id: &TerminalId,
+        ) -> Result<Option<TerminalExitStatus>, TerminalError> {
+            self.inner.wait_for_exit(terminal_id)
+        }
     }
 
     #[test]
@@ -1623,11 +1717,10 @@ mod tests {
             .terminal_input(TerminalInputRequest {
                 session_id: "sess-1".to_string(),
                 terminal_id: terminal_id.0.clone(),
-                input: "j".to_string(),
+                input: "\u{1b}[?1049h".to_string(),
                 source: TerminalInputSource::User,
             })
             .unwrap();
-        bridge.backend.write(&terminal_id, "\u{1b}[?1049h").unwrap();
 
         let denied = bridge.terminal_output("sess-1", &terminal_id).unwrap_err();
         assert!(denied.contains("interactive mode under user control"));
@@ -1635,6 +1728,81 @@ mod tests {
         bridge.backend.write(&terminal_id, "\u{1b}[?1049l").unwrap();
         let (output, _) = bridge.terminal_output("sess-1", &terminal_id).unwrap();
         assert!(output.contains("\u{1b}[?1049l"));
+    }
+
+    #[test]
+    fn interactive_mode_is_refreshed_for_kill_without_prior_output_poll() {
+        let mut bridge = LocalAcpTerminalBridge::new(create_contract_backend());
+        let terminal_id = bridge
+            .terminal_create(TerminalCreateRequest {
+                session_id: "sess-1".to_string(),
+                command: "echo".to_string(),
+                args: vec!["interactive".to_string()],
+                cwd: "/tmp".to_string(),
+                output_byte_limit: DEFAULT_OUTPUT_BYTE_LIMIT,
+            })
+            .unwrap();
+
+        let record = bridge.terminals.get_mut(&terminal_id.0).unwrap();
+        record.input_owner = TerminalInputSource::User;
+        bridge.backend.write(&terminal_id, "\u{1b}[?1049h").unwrap();
+
+        let denied = bridge.terminal_kill("sess-1", &terminal_id).unwrap_err();
+        assert!(denied.contains("interactive mode under user control"));
+    }
+
+    #[test]
+    fn cursor_save_restore_sequences_do_not_toggle_interactive_mode() {
+        let mut bridge = LocalAcpTerminalBridge::new(create_contract_backend());
+        let terminal_id = bridge
+            .terminal_create(TerminalCreateRequest {
+                session_id: "sess-1".to_string(),
+                command: "echo".to_string(),
+                args: vec!["cursor".to_string()],
+                cwd: "/tmp".to_string(),
+                output_byte_limit: DEFAULT_OUTPUT_BYTE_LIMIT,
+            })
+            .unwrap();
+
+        bridge.backend.write(&terminal_id, "\u{1b}[?1048h").unwrap();
+        let (output, _) = bridge.terminal_output("sess-1", &terminal_id).unwrap();
+        assert!(output.contains("\u{1b}[?1048h"));
+        assert!(
+            !bridge
+                .terminals
+                .get(&terminal_id.0)
+                .unwrap()
+                .interactive_mode
+        );
+    }
+
+    #[test]
+    fn terminal_input_write_failure_keeps_owner_state() {
+        let mut bridge = LocalAcpTerminalBridge::new(create_contract_backend());
+        let terminal_id = bridge
+            .terminal_create(TerminalCreateRequest {
+                session_id: "sess-1".to_string(),
+                command: "echo".to_string(),
+                args: vec!["failure".to_string()],
+                cwd: "/tmp".to_string(),
+                output_byte_limit: DEFAULT_OUTPUT_BYTE_LIMIT,
+            })
+            .unwrap();
+        bridge.backend.kill(&terminal_id).unwrap();
+
+        let input_error = bridge
+            .terminal_input(TerminalInputRequest {
+                session_id: "sess-1".to_string(),
+                terminal_id: terminal_id.0.clone(),
+                input: "still-fails".to_string(),
+                source: TerminalInputSource::User,
+            })
+            .unwrap_err();
+        assert!(input_error.contains("already exited"));
+        assert_eq!(
+            bridge.terminals.get(&terminal_id.0).unwrap().input_owner,
+            TerminalInputSource::Agent
+        );
     }
 
     #[test]
@@ -1695,6 +1863,41 @@ mod tests {
         assert!(error
             .to_string()
             .contains(&format!("not owned by session {}", session_b.session_id)));
+    }
+
+    #[test]
+    fn cross_session_output_rejects_before_backend_read() {
+        let output_calls = Arc::new(AtomicUsize::new(0));
+        let backend = Box::new(CountingOutputBackend::new(output_calls.clone()));
+        let mut server = AcpServer::with_terminal_backend(backend);
+        server
+            .initialize(InitializeRequest {
+                protocol_version: ACP_PROTOCOL_VERSION,
+                client_capabilities: ClientCapabilities {
+                    terminal: true,
+                    fs_read_text_file: true,
+                    fs_write_text_file: true,
+                },
+            })
+            .unwrap();
+
+        let session_a = server.new_session("/tmp/a".to_string()).unwrap();
+        let session_b = server.new_session("/tmp/b".to_string()).unwrap();
+        let terminal_id = server
+            .terminal_create(TerminalCreateRequest {
+                session_id: session_a.session_id.clone(),
+                command: "echo".to_string(),
+                args: vec!["owned".to_string()],
+                cwd: "/tmp/a".to_string(),
+                output_byte_limit: DEFAULT_OUTPUT_BYTE_LIMIT,
+            })
+            .unwrap();
+
+        let error = server
+            .terminal_output(&session_b.session_id, &terminal_id)
+            .unwrap_err();
+        assert!(matches!(error, AcpServerError::TerminalOperation(_)));
+        assert_eq!(output_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1854,17 +2057,30 @@ mod tests {
             json!({
                 "session_id": session.session_id,
                 "terminal_id": terminal_id.clone(),
-                "input": "j",
+                "input": "\u{1b}[?1049h",
                 "source": "user"
             }),
         )));
         assert!(user_input.error.is_none());
-        transport
-            .server_mut()
-            .terminal_bridge
-            .backend
-            .write(&TerminalId(terminal_id.clone()), "\u{1b}[?1049h")
-            .unwrap();
+        assert!(
+            transport
+                .server()
+                .terminal_bridge
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .interactive_mode
+        );
+        assert_eq!(
+            transport
+                .server()
+                .terminal_bridge
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .input_owner,
+            TerminalInputSource::User
+        );
 
         let blocked_output = parse_rpc_response(&transport.handle_line(&rpc_request(
             json!(5),
@@ -1888,15 +2104,20 @@ mod tests {
         assert!(blocked_kill.error.is_some());
         assert_eq!(blocked_kill.error.unwrap().code, -32005);
 
-        transport
-            .server_mut()
-            .terminal_bridge
-            .backend
-            .write(&TerminalId(terminal_id.clone()), "\u{1b}[?1049l")
-            .unwrap();
+        let user_exit = parse_rpc_response(&transport.handle_line(&rpc_request(
+            json!(7),
+            "terminal/input",
+            json!({
+                "session_id": session.session_id,
+                "terminal_id": terminal_id.clone(),
+                "input": "\u{1b}[?1049l",
+                "source": "user"
+            }),
+        )));
+        assert!(user_exit.error.is_none());
 
         let unblocked_output = parse_rpc_response(&transport.handle_line(&rpc_request(
-            json!(7),
+            json!(8),
             "terminal/output",
             json!({
                 "session_id": session.session_id,
@@ -1906,7 +2127,7 @@ mod tests {
         assert!(unblocked_output.error.is_none());
 
         let unblocked_kill = parse_rpc_response(&transport.handle_line(&rpc_request(
-            json!(8),
+            json!(9),
             "terminal/kill",
             json!({
                 "session_id": session.session_id,
