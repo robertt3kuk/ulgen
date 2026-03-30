@@ -86,6 +86,10 @@
   - alternate-screen transitions (`?1049`, `?1048`, `?1047`, `?47` enter/exit) are detected from terminal output stream
   - user-sourced input can claim interactive control while in alternate screen
   - agent operations that would disrupt user control are denied while interactive mode is user-owned
+- Permission gating baseline (M4-4):
+  - ownership validation is evaluated before backend output reads for cross-session protection
+  - user-owned interactive sessions deny agent `terminal/input`, `terminal/output`, `terminal/kill`, and `terminal/release`
+  - denied operations surface as terminal operation errors (`-32005`) for auditable client handling
 - JSON-RPC stdio transport accepts line-delimited request frames and returns one JSON response frame per request (notifications return no response frame).
 - JSON-RPC `id` values support `string` and `number`; parse/invalid-request failures return `id: null`.
 - Error contract:
